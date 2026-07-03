@@ -55,3 +55,5 @@ values
 
 ## Testar os parsers sem subir o app
 `npx tsx test-parsers.ts` — roda os 4 parsers contra os textos reais em `fixtures/`.
+
+
