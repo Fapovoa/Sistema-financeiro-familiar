@@ -31,6 +31,8 @@ export function parseItauExtrato(text: string): ParseResult {
     const { type } = classifyType(desc, amount);
     const cat = suggestCategory(desc);
     const isFaturaPaga = /FATURA PAGA|PAG BOLETO NU PAGAMENTOS/i.test(desc);
+    // Receitas são preenchidas manualmente: entradas não entram na importação
+    if (amount > 0 && !isFaturaPaga) continue;
 
     txs.push({
       transaction_date: brDateToISO(date),
