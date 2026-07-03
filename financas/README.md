@@ -57,3 +57,6 @@ values
 `npx tsx test-parsers.ts` — roda os 4 parsers contra os textos reais em `fixtures/`.
 
 
+
+
+
