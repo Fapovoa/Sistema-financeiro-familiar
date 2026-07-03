@@ -2,10 +2,29 @@ import { ParsedTransaction, ParseResult } from "./types";
 import { brDateToISO, cleanDescription, detectInstallment, parseBRL } from "./normalize";
 import { suggestCategory, isRecurringCandidate } from "@/lib/engine/categorize";
 
+// Linha de compra: "28/05 IVAN SOUZA 11/12 164,63"  (dd/mm  estabelecimento  valor)
 const TX = /^(\d{2}\/\d{2})\s+(.+?)\s+(-?\d{1,3}(?:\.\d{3})*,\d{2})\s*$/;
-const SKIP = /(SALDO|Total d|Total p|Pr[óo]xima fatura|Demais faturas|Limite|Juros|IOF|Multa|Encargos|DATA\s+ESTABELECIMENTO|PAGAMENTO\b|Total dos pagamentos|Lan[çc]amentos no cart|Repasse|D[óo]lar|Total (transa|lan[çc]amentos))/i;
+// Linha internacional em R$: "11/03 OPENAI *CHATGPT SUBSCRS 109,60"
+// (mesma forma da TX; tratada no fluxo principal)
 
-/** Fatura Itaú: "28/12 METRO RJ... 7,90" (valor positivo = despesa). */
+// Linhas que NÃO são compras (cabeçalhos, totais, boleto, encargos, etc.)
+const SKIP = new RegExp([
+  "SALDO", "Total d", "Total p", "Pr[óo]xima fatura", "Demais faturas",
+  "Limite", "Juros", "IOF", "Multa", "Encargos", "DATA\\s+ESTABELECIMENTO",
+  "DATA\\s+PRODUTOS", "DATA\\s+VALOR", "PAGAMENTO", "Pagamento",
+  "Lan[çc]amentos", "Repasse", "D[óo]lar de Convers", "FERNANDO",
+  "Resumo da fatura", "Titular", "Cart[ãa]o\\b", "Postagem", "Vencimento:",
+  "Emiss[ãa]o", "Previs[ãa]o", "recibo do pagador", "Banco Ita[úu]",
+  "Nosso N[úu]mero", "Ag[êe]ncia", "Local de Pagamento", "Nome do",
+  "Endere[çc]o", "Uso do Banco", "Carteira", "Esp[ée]cie", "Quantidade",
+  "Aceite", "Autentica[çc]", "Sacador", "Valor do Documento",
+  "Data de Vencimento", "Instru[çc]", "O n[ãa]o pagamento",
+  "Preparamos", "Parcelas fixas", "Valor em reais", "Valor total financiado",
+  "Total a pagar", "O total da sua fatura", "Com vencimento",
+  "Principal \\(", "USD\\b", "BRL\\b", "^\\d+[.,]\\d{2}\\s+(USD|BRL)",
+].join("|"), "i");
+
+/** Fatura Itaú: compras vêm em 2 linhas (dados + categoria/cidade). Lê a 1ª, ignora a 2ª. */
 export function parseItauFatura(text: string): ParseResult {
   const warnings: string[] = [];
 
@@ -17,39 +36,46 @@ export function parseItauFatura(text: string): ParseResult {
   const dueDate = dueISO ? new Date(dueISO + "T12:00:00") : null;
   const refMonth = dueISO ? dueISO.slice(0, 7) : null;
 
-  // Seção de parcelas futuras não deve virar lançamento desta fatura
+  // Corta a seção "Compras parceladas - próximas faturas" (são previsões, não desta fatura)
   const cutIdx = text.search(/Compras?\s+par?cel?adas?\s*-\s*pr[óo]?x/i);
   const body = cutIdx > 0 ? text.slice(0, cutIdx) : text;
 
+  const lines = body.split(/\n/).map((l) => l.trim());
   const txs: ParsedTransaction[] = [];
-  for (const raw of body.split(/\n/)) {
-    const line = raw.trim();
+  const seen = new Set<string>();      // evita repetir a mesma compra (aparece em resumos)
+
+  for (const line of lines) {
     if (!line || SKIP.test(line)) continue;
     const m = line.match(TX);
     if (!m) continue;
-    const [, ddmm, desc, val] = m;
+    const [, ddmm, descRaw, val] = m;
 
     const amount = parseBRL(val);
     if (!Number.isFinite(amount) || amount === 0) continue;
 
-    // Inferência de ano: compras podem ser do ano anterior ao vencimento
+    // Descarta linhas de conversão internacional ("20,00 USD 20,00") que casam o padrão
+    if (/\b(USD|BRL)\b/i.test(descRaw)) continue;
+
+    const desc = descRaw.trim();
+    // Ano: compras podem ser do ano anterior ao vencimento (dez/jan)
     let year = dueDate ? dueDate.getFullYear() : new Date().getFullYear();
     const [dd, mm] = ddmm.split("/");
     let iso = `${year}-${mm}-${dd}`;
-    if (dueDate && new Date(iso + "T12:00:00") > dueDate) {
-      iso = `${year - 1}-${mm}-${dd}`;
-    }
+    if (dueDate && new Date(iso + "T12:00:00") > dueDate) iso = `${year - 1}-${mm}-${dd}`;
 
     const inst = detectInstallment(desc);
     const cat = suggestCategory(desc);
-    const isPayment = /PAGAMENTO/i.test(desc);
-    if (isPayment) continue;
+
+    // Chave de deduplicação interna (mesma compra listada 2x no PDF)
+    const key = `${iso}|${amount}|${desc.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
 
     txs.push({
       transaction_date: iso,
       description_original: desc,
       description_clean: cleanDescription(desc.replace(/\s*\d{1,2}\/\d{1,2}\s*$/, "")),
-      amount: -Math.abs(amount),           // fatura lista despesas como positivas
+      amount: -Math.abs(amount),
       type: amount < 0 ? "refund" : "expense",
       category_suggestion: cat.category,
       confidence_score: cat.confidence,
@@ -60,12 +86,13 @@ export function parseItauFatura(text: string): ParseResult {
       is_card_purchase: true,
       invoice_reference_month: refMonth,
       invoice_due_date: dueISO,
-      affects_cash_flow: false,            // regra-chave: compra de cartão não bate no caixa
+      affects_cash_flow: false,
       affects_category_report: true,
       deduplication_status: "new",
       suggested_action: cat.confidence < 0.5 ? "audit" : "import",
     });
   }
+
   if (!dueISO) warnings.push("Não foi possível identificar a data de vencimento da fatura.");
   if (txs.length === 0) warnings.push("Nenhum lançamento reconhecido na fatura Itaú.");
 

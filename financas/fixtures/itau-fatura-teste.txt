@@ -1,0 +1,106 @@
+Itaú Uniclass
+Resumo da fatura em R$
+Total da fatura anterior 4.491,79
+Pagamento efetuado em 09/03/2026 -4.491,79
+Saldo financiado 0,00
+Lançamentos atuais 6.142,43
+Total desta fatura 6.142,43
+Titular FERNANDO AQUINO POVOA
+Cartão 2233.XXXX.XXXX.0260
+Postagem: 02/04/2026
+Vencimento: 09/04/2026
+Emissão: 02/04/2026
+Previsão próx. Fechamento: 02/05/2026
+Pagamentos efetuados
+DATA VALOR EM R$
+09/03 Pagamento via conta -4.491,79
+Total dos pagamentos -4.491,79
+Lançamentos: compras e saques
+FERNANDO AQUINO POVOA
+DATA ESTABELECIMENTO VALOR EM R$
+28/05 IVAN SOUZA 11/12 164,63
+outros BELO HORIZONT
+16/06 AMAZONMKTPLC*G 10/10 296,91
+ELETRONICS SAO PAULO
+22/07 RK DESENVOLVIM 09/12 20,37
+educacao Campina Gran
+24/07 Vox2you 09/12 83,12
+educacao Ribeiro Preto
+24/07 VOZ CURSOS E T 09/12 150,87
+educacao JUIZ DE FORA
+28/07 FESTIVALZINHO 09/12 61,98
+lazer RIO DE JANEIR
+26/08 UNICA STORE -C 08/12 74,24
+outros JUIZ DE FORA
+01/12 PARC*APPLE.COM 05/12 32,26
+Principal (R$ 29,73) + Juros (R$ 2,53)
+15/01 MERCADOLIVRE*H 03/06 50,66
+eletronicos Niteri
+15/01 MERCADOLIVRE*C 03/03 44,49
+eletronicos Igrejinha
+16/01 CEA JFS 603 EC 03/03 53,33
+vestuário JUIZ DE FORA
+16/01 CARREFOUR PST 03/06 24,99
+outros JUIZ DE FORA
+18/01 MERCADO*KRISKA 03/03 29,81
+vestuário SAO PAULO
+20/01 MP *HLPNEUSAUT 03/06 131,50
+outros SOROCABA
+26/01 JIM.COM* DANIE 03/03 195,28
+serviços UBA
+Lançamentos: compras e saques
+DATA ESTABELECIMENTO VALOR EM R$
+27/01 00111 SH INDE 03/03 134,16
+vestuário JUIZ DE FORA
+21/02 00111 SH INDE 02/03 73,16
+vestuário JUIZ DE FORA
+01/03 IFD*MATCH PIZZA LTDAJUI 76,24
+restaurante JUIZ DE FORA
+02/03 AutoPostoChaleJUIZ DE F 150,00
+outros JUIZ DE FORA
+08/03 ZUKIJUIZ DE FORABRA 24,00
+restaurante JUIZ DE FORA
+08/03 ZUKIJUIZ DE FORABRA 196,50
+restaurante JUIZ DE FORA
+09/03 Araujo LojaJUIZ DE FORA 275,91
+saúde JUIZ DE FORA
+10/03 FIBRATECH SPAZIOJUIZ DE 219,90
+lazer JUIZ DE FORA
+Lançamentos: compras e saques
+DATA ESTABELECIMENTO VALOR EM R$
+15/03 JF BOUTIQUE DE 01/06 93,35
+vestuário JUIZ DE FORA
+15/03 LOJAS RENNER F 01/02 69,95
+vestuário JUIZ DE FORA
+18/03 AutoPostoChaleJUIZ DE F 348,87
+outros JUIZ DE FORA
+Lançamentos: compras e saques
+DATA ESTABELECIMENTO VALOR EM R$
+28/03 BAHAMAS 0000 MN 167,60
+supermercado NASGERAIS
+30/03 CARREFOUR PST 256 PCJJU 250,00
+outros JUIZ DE FORA
+31/03 PANIFICACAO RIAN LTDARI 27,80
+supermercado RIO DE JANEIR
+Lançamentos no cartão 5.891,89
+Lançamentos internacionais
+FERNANDO AQUINO POVOA
+DATA ESTABELECIMENTO US$ R$
+11/03 OPENAI *CHATGPT SUBSCRS 109,60
+20,00 USD 20,00
+Dólar de Conversão R$ 5,48
+23/03 CLAUDE.AI SUBSCRIPTIONS 117,42
+110,00 BRL 20,93
+Dólar de Conversão R$ 5,61
+Total transações inter. em R$ 227,02
+Repasse de IOF em R$ 7,95
+Total lançamentos inter. em R$ 234,97
+Lançamentos: produtos e serviços
+DATA PRODUTOS/SERVIÇOS VALOR EM R$
+20/03 SEG CARTAO PROTEGIDO 15,57
+Lançamentos produtos e serviços 15,57
+Total dos lançamentos atuais 6.142,43
+Compras parceladas - próximas faturas
+DATA ESTABELECIMENTO VALOR EM R$
+28/05 IVAN SOUZA 12/12 164,63
+22/07 RK DESENVOLVIM 10/12 20,37

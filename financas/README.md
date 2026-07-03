@@ -1,4 +1,4 @@
-# Finanças Familiares — Parte 1
+# Finanças Familiares — Partes 1 e 2
 
 Sistema de controle financeiro familiar (Next.js 15 + TypeScript + Tailwind + Supabase), com importação automática de PDFs de extratos e faturas.
 
@@ -23,12 +23,15 @@ Sistema de controle financeiro familiar (Next.js 15 + TypeScript + Tailwind + Su
 
 **Banco**: `supabase/migrations/001_initial_schema.sql` — todas as tabelas, RLS por `user_id`, bucket privado `documents`, categorias padrão criadas por trigger no cadastro.
 
-## Próximas entregas (Parte 2)
-- Fluxo de caixa diário (tabela + gráfico, 30/60/90 dias)
-- Contas & cartões (CRUD) e Categorias (CRUD)
-- Refinos: reprocessar documento, edição inline de despesas, recorrência automática em despesas
+## Parte 2 (incluída)
+- **Fluxo de caixa** (`/fluxo-caixa`) — tabela diária (receitas, despesas, faturas, saldo do dia e acumulado) + gráfico; períodos: mês atual, 30/60/90 dias, ano
+- **Contas & cartões** (`/contas`) — CRUD completo, com fechamento/vencimento/limite para cartões
+- **Categorias** (`/categorias`) — CRUD com cores, colunas de despesa e receita
 
-> As páginas `/fluxo-caixa`, `/contas` e `/categorias` estão como placeholder para o app compilar.
+## Próximas entregas (Parte 3)
+- Reprocessar documento e histórico de importações
+- Edição inline de despesas e recorrência automática em despesas
+- Reativação da autenticação (ver `supabase/migrations/002_disable_auth_temp.sql`)
 
 ## Como rodar
 
@@ -55,10 +58,3 @@ values
 
 ## Testar os parsers sem subir o app
 `npx tsx test-parsers.ts` — roda os 4 parsers contra os textos reais em `fixtures/`.
-
-
-
-
-
-
-

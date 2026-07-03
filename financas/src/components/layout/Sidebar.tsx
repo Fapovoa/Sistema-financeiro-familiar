@@ -28,9 +28,10 @@ export function Sidebar({ auditCount = 0 }: { auditCount?: number }) {
         <span className="text-lg font-bold tracking-tight">Finanças</span>
       </Link>
 
-      <div className="mb-4 rounded-full border border-brand-100 px-4 py-2 text-sm font-medium text-brand-600">
+      <Link href="/importar"
+        className="mb-4 rounded-full border border-brand-100 px-4 py-2 text-sm font-medium text-brand-600 transition hover:bg-brand-50">
         <span className="inline-flex items-center gap-2"><Sparkles size={14} /> Importação inteligente</span>
-      </div>
+      </Link>
 
       <nav className="flex-1 space-y-1">
         {NAV.map(({ href, label, icon: Icon }) => {
