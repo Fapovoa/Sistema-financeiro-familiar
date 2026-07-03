@@ -43,6 +43,8 @@ export function parseInterExtrato(text: string): ParseResult {
     let { type } = classifyType(full, amount);
     if (type === "transfer") type = amount < 0 ? "expense" : "income";
     const isCardPay = /nu pagamentos|pagamento de fatura|fatura/i.test(desc) && /pagamento/i.test(kind);
+    // Receitas são preenchidas manualmente: entradas não entram na importação
+    if (amount > 0 && !isCardPay) continue;
 
     txs.push({
       transaction_date: currentISO,
