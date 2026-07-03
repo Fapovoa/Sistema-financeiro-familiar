@@ -2,39 +2,44 @@ import { ParsedTransaction, ParseResult } from "./types";
 import { brDateToISO, cleanDescription, detectInstallment, parseBRL } from "./normalize";
 import { suggestCategory, isRecurringCandidate } from "@/lib/engine/categorize";
 
-// Linha de compra: "28/05 IVAN SOUZA 11/12 164,63"  (dd/mm  estabelecimento  valor)
-const TX = /^(\d{2}\/\d{2})\s+(.+?)\s+(-?\d{1,3}(?:\.\d{3})*,\d{2})\s*$/;
+// A extração do PDF pode vir SEM espaços entre as colunas:
+//   "28/05IVAN SOUZA     11/12164,63"   (data + estabelecimento + parcela + valor)
+//   "03/03ARMAZEM BOM PASTORJUIZ23,80"  (data + estabelecimento + valor)
+// Ou com espaços (visualizadores diferentes). Os padrões abaixo cobrem os dois casos.
+const AMOUNT = "(-?\\d{1,3}(?:\\.\\d{3})*,\\d{2})";
+const TX_INSTALLMENT = new RegExp(`^(\\d{2}\\/\\d{2})\\s*(.+?)\\s(\\d{2}\\/\\d{2})\\s*${AMOUNT}\\s*$`);
+const TX_SIMPLE = new RegExp(`^(\\d{2}\\/\\d{2})\\s*(.+?)\\s*${AMOUNT}\\s*$`);
 
 // Linhas que NÃO são compras (cabeçalhos, totais, boleto, encargos, etc.)
 const SKIP = new RegExp([
   "SALDO", "Total d", "Total p", "Pr[óo]xima fatura", "Demais faturas",
-  "Limite", "Juros", "IOF", "Multa", "Encargos", "DATA\\s+ESTABELECIMENTO",
-  "DATA\\s+PRODUTOS", "DATA\\s+VALOR", "PAGAMENTO", "Pagamento",
-  "Lan[çc]amentos", "Repasse", "D[óo]lar de Convers", "FERNANDO",
-  "Resumo da fatura", "Titular", "Cart[ãa]o\\b", "Postagem", "Vencimento:",
-  "Emiss[ãa]o", "Previs[ãa]o", "recibo do pagador", "Banco Ita[úu]",
-  "Nosso N[úu]mero", "Ag[êe]ncia", "Local de Pagamento", "Nome do",
-  "Endere[çc]o", "Uso do Banco", "Carteira", "Esp[ée]cie", "Quantidade",
-  "Aceite", "Autentica[çc]", "Sacador", "Valor do Documento",
-  "Data de Vencimento", "Instru[çc]", "O n[ãa]o pagamento",
-  "Preparamos", "Parcelas fixas", "Valor em reais", "Valor total financiado",
+  "Limite", "Juros", "IOF", "Multa", "Encargos", "ESTABELECIMENTO",
+  "PRODUTOS/SERVI", "PAGAMENTO", "Pagamento", "Lan[çc]amentos", "Repasse",
+  "D[óo]lar de Convers", "Resumo da fatura", "Titular", "Postagem",
+  "Vencimento", "Emiss[ãa]o", "Previs[ãa]o", "recibo do pagador",
+  "Banco Ita[úu]", "Nosso N[úu]mero", "Ag[êe]ncia", "Local de Pagamento",
+  "Nome do", "Endere[çc]o", "Uso do Banco", "Carteira", "Esp[ée]cie",
+  "Quantidade", "Aceite", "Autentica[çc]", "Sacador", "Valor do Documento",
+  "Data de Vencimento", "Instru[çc]", "O n[ãa]o pagamento", "Preparamos",
+  "Parcelas fixas", "Valor em reais", "Valor total financiado",
   "Total a pagar", "O total da sua fatura", "Com vencimento",
-  "Principal \\(", "USD\\b", "BRL\\b",
+  "Principal \\(", "\\bUSD\\b", "\\bBRL\\b", "Fique atento", "Simula[çc]",
 ].join("|"), "i");
 
-/** Fatura Itaú: compras vêm em 2 linhas (dados + categoria/cidade). Lê a 1a, ignora a 2a. */
+/** Fatura Itaú — robusto a texto com ou sem espaços entre colunas. */
 export function parseItauFatura(text: string): ParseResult {
   const warnings: string[] = [];
 
   const due = text.match(/Vencimento:\s*(\d{2}\/\d{2}\/\d{4})/i);
   const closing = text.match(/Fechamento:\s*(\d{2}\/\d{2}\/\d{4})/i);
-  const total = text.match(/Total desta fatura\s+([\d.]+,\d{2})/i);
+  const total = text.match(/Total desta fatura\s*([\d.]+,\d{2})/i);
 
   const dueISO = due ? brDateToISO(due[1]) : null;
   const dueDate = dueISO ? new Date(dueISO + "T12:00:00") : null;
   const refMonth = dueISO ? dueISO.slice(0, 7) : null;
 
-  const cutIdx = text.search(/Compras?\s+par?cel?adas?\s*-\s*pr[óo]?x/i);
+  // Corta a seção "Compras parceladas - próximas faturas" (previsões, não desta fatura)
+  const cutIdx = text.search(/Compras?\s*par?cel?adas?\s*-\s*pr[óo]?x/i);
   const body = cutIdx > 0 ? text.slice(0, cutIdx) : text;
 
   const lines = body.split(/\n/).map((l) => l.trim());
@@ -43,15 +48,23 @@ export function parseItauFatura(text: string): ParseResult {
 
   for (const line of lines) {
     if (!line || SKIP.test(line)) continue;
-    const m = line.match(TX);
-    if (!m) continue;
-    const [, ddmm, descRaw, val] = m;
+
+    // 1º tenta o padrão com parcela (NN/NN colado no valor); depois o simples
+    let ddmm = "", desc = "", val = "";
+    const mi = line.match(TX_INSTALLMENT);
+    if (mi) {
+      ddmm = mi[1]; desc = `${mi[2].trim()} ${mi[3]}`; val = mi[4];
+    } else {
+      const ms = line.match(TX_SIMPLE);
+      if (!ms) continue;
+      ddmm = ms[1]; desc = ms[2].trim(); val = ms[3];
+    }
 
     const amount = parseBRL(val);
     if (!Number.isFinite(amount) || amount === 0) continue;
-    if (/\b(USD|BRL)\b/i.test(descRaw)) continue;
+    if (desc.length < 3) continue;
 
-    const desc = descRaw.trim();
+    // Ano: compras podem ser do ano anterior ao vencimento (parcelas antigas, dez/jan)
     let year = dueDate ? dueDate.getFullYear() : new Date().getFullYear();
     const [dd, mm] = ddmm.split("/");
     let iso = `${year}-${mm}-${dd}`;
