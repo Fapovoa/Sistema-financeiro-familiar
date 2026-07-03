@@ -100,11 +100,11 @@ export function parseItauFatura(text: string): ParseResult {
   }
 
   if (!dueISO) warnings.push("Não foi possível identificar a data de vencimento da fatura.");
-  if (txs.length === 0) warnings.push("Nenhum lançamento reconhecido na fatura Itaú.");
+  if (txs.length === 0) warnings.push("Nenhum lançamento reconhecido na fatura Itaú. [parser v3]");
 
   return {
     detected_type: "credit_card_statement",
-    detected_institution: "Itaú",
+    detected_institution: "Itaú (v3)",
     invoice: {
       total_amount: total ? parseBRL(total[1]) : null,
       due_date: dueISO,
