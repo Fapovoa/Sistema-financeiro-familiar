@@ -2,11 +2,14 @@ import { ParsedTransaction, ParseResult } from "./types";
 import { cleanDescription, monthPtToNum, parseBRL } from "./normalize";
 import { classifyType, suggestCategory, isRecurringCandidate } from "@/lib/engine/categorize";
 
-const DAY = /^(\d{1,2})\s+de\s+([A-Za-zç]+)\s+de\s+(\d{4})\s+Saldo do dia/i;
-// 'Pix enviado: "Cp :123-Fulano" -R$ 19,00 R$ 96,24'  (1º valor = transação, 2º = saldo)
-const TX = /^(Pix enviado|Pix recebido|Compra no debito|Compra Meio De Transporte|Pagamento efetuado|Pagamento de Convenio|Boleto de cobranca recebido):\s*"?(.*?)"?\s+(-?R\$\s*[\d.]+,\d{2})\s+(-?R\$\s*[\d.]+,\d{2})\s*$/i;
+// Com ou sem espaços:
+//   '1 de Janeiro de 2026 Saldo do dia: R$ 96,24'
+//   'Pix enviado: "Cp :10573521-Roberto" -R$ 19,00 R$ 96,24'  (1º valor = transação, 2º = saldo)
+// O "R$" antes de cada valor torna a leitura segura mesmo com texto grudado.
+const DAY = /^(\d{1,2})\s*de\s*([A-Za-zç]+)\s*de\s*(\d{4})\s*Saldo do dia/i;
+const TX = /^(Pix enviado|Pix recebido|Compra no debito|Compra Meio De Transporte|Pagamento efetuado|Pagamento de Convenio|Boleto de cobranca recebido|Pagamento recebido)\s*:\s*"?(.*?)"?\s*(-?)\s*R\$\s*([\d.]+,\d{2})\s*-?\s*R\$\s*[\d.]+,\d{2}\s*$/i;
 
-/** Extrato Banco Inter: cabeçalho por dia + linhas com valor e saldo por transação. */
+/** Extrato Banco Inter — robusto a texto com ou sem espaços. */
 export function parseInterExtrato(text: string): ParseResult {
   const txs: ParsedTransaction[] = [];
   const warnings: string[] = [];
@@ -25,9 +28,11 @@ export function parseInterExtrato(text: string): ParseResult {
     const m = line.match(TX);
     if (!m || !currentISO) continue;
 
-    const [, kind, descRaw, valRaw] = m;
-    const amount = parseBRL(valRaw);
+    const [, kind, descRaw, neg, valRaw] = m;
+    let amount = parseBRL(valRaw);
     if (!Number.isFinite(amount) || amount === 0) continue;
+    if (neg === "-") amount = -Math.abs(amount);
+    else if (/enviado|efetuado|debito|transporte|convenio/i.test(kind)) amount = -Math.abs(amount);
 
     const desc = descRaw
       .replace(/^Cp :\d+-?/, "")
@@ -36,12 +41,8 @@ export function parseInterExtrato(text: string): ParseResult {
     const full = `${kind}: ${desc}`;
     const cat = suggestCategory(desc);
     let { type } = classifyType(full, amount);
-    // PIX no Inter é o meio de pagamento padrão: se a categoria é reconhecida
-    // (mercado, saúde, casa…), trata como despesa/receita, não transferência.
-    if (type === "transfer" && cat.category) type = amount < 0 ? "expense" : "income";
-    // PIX para pessoa física sem categoria: mantém como despesa de baixa confiança -> auditoria
-    if (type === "transfer" && !cat.category) type = amount < 0 ? "expense" : "income";
-    const isCardPay = /nu pagamentos|pagamento de fatura|fatura/i.test(desc) && kind.toLowerCase().includes("pagamento");
+    if (type === "transfer") type = amount < 0 ? "expense" : "income";
+    const isCardPay = /nu pagamentos|pagamento de fatura|fatura/i.test(desc) && /pagamento/i.test(kind);
 
     txs.push({
       transaction_date: currentISO,
@@ -62,6 +63,6 @@ export function parseInterExtrato(text: string): ParseResult {
       suggested_action: isCardPay ? "reconcile" : cat.confidence < 0.5 && type === "expense" ? "audit" : "import",
     });
   }
-  if (txs.length === 0) warnings.push("Nenhum lançamento reconhecido no extrato Inter.");
-  return { detected_type: "bank_statement", detected_institution: "Banco Inter", transactions: txs, warnings };
+  if (txs.length === 0) warnings.push("Nenhum lançamento reconhecido no extrato Inter. [parser v3]");
+  return { detected_type: "bank_statement", detected_institution: "Banco Inter (v3)", transactions: txs, warnings };
 }
