@@ -2,9 +2,7 @@
 import { useEffect, useState } from "react";
 import { Header } from "@/components/layout/Header";
 import { createClient } from "@/lib/supabase/client";
-import { FAMILY_USER_ID } from "@/lib/user";
 import { brl, brDate } from "@/lib/format";
-import { projectRecurrences } from "@/lib/engine/recurrence";
 import { Plus, Trash2 } from "lucide-react";
 import clsx from "clsx";
 
@@ -40,49 +38,41 @@ export default function ReceitasPage() {
   }
   useEffect(() => { load(); }, []);
 
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    const amount = Math.abs(parseFloat(form.amount.replace(",", ".")));
-    if (!form.description || !Number.isFinite(amount)) return;
-    setSaving(true);
-
-    const base = {
-      user_id: FAMILY_USER_ID,
-      account_id: form.account_id || null,
-      category_id: form.category_id || null,
-      type: "income",
-      description_original: form.description,
-      description_clean: form.description,
-      source: "manual",
-      is_recurring: form.recurring,
-      is_card_purchase: false,
-      affects_cash_flow: true,
-      affects_category_report: true,
-      notes: form.notes || null,
-    };
-
-    await supabase.from("transactions").insert({
-      ...base, amount, transaction_date: form.date, status: form.status,
+    setSaving(true); setMsg(null);
+    const res = await fetch("/api/transactions/manual", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "income",
+        date: form.date,
+        description: form.description,
+        amount: parseFloat(form.amount.replace(/\./g, "").replace(",", ".")),
+        category_id: form.category_id || null,
+        account_id: form.account_id || null,
+        status: form.status,
+        recurring: form.recurring && form.frequency === "monthly",
+        notes: form.notes || null,
+      }),
     });
-
-    // Projeção automática de receitas recorrentes (fluxo futuro)
-    if (form.recurring && form.frequency === "monthly") {
-      const futures = projectRecurrences({ lastDateISO: form.date, amount, months: 3 });
-      await supabase.from("transactions").insert(
-        futures.map((f) => ({
-          ...base, amount: f.amount, transaction_date: f.transaction_date,
-          status: "forecast", source: "recurrence",
-          description_original: `${form.description} (prevista)`,
-        }))
-      );
-    }
+    const json = await res.json().catch(() => ({}));
     setSaving(false);
+    if (!res.ok) return setMsg({ ok: false, text: `ERRO ao gravar: ${json.error ?? res.statusText}` });
+    setMsg({ ok: true, text: json.projected ? `Receita gravada + ${json.projected} meses previstos.` : "Receita gravada no banco." });
     setForm((f) => ({ ...f, description: "", amount: "", notes: "" }));
     load();
   }
 
   async function remove(id: string) {
-    await supabase.from("transactions").delete().eq("id", id);
+    const res = await fetch("/api/transactions/manual", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    if (!res.ok) { const j = await res.json().catch(() => ({})); setMsg({ ok: false, text: `ERRO ao excluir: ${j.error ?? res.statusText}` }); return; }
     load();
   }
 
@@ -90,6 +80,9 @@ export default function ReceitasPage() {
     <>
       <Header title="Receitas" />
       <div className="space-y-5 p-6">
+        {msg && (
+          <p className={`rounded-xl px-4 py-3 text-sm ${msg.ok ? "bg-success-bg text-success-fg" : "bg-danger-bg text-danger-fg"}`}>{msg.text}</p>
+        )}
         <form onSubmit={add} className="card grid grid-cols-1 gap-4 p-5 md:grid-cols-4 xl:grid-cols-8">
           <label className="text-sm"><span className="mb-1 block font-medium">Data</span>
             <input type="date" className="input" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required /></label>
