@@ -17,6 +17,7 @@ type PreviewTx = {
   deduplication_status: string; duplicate_match_id?: string | null;
   suggested_action: "import" | "ignore" | "audit" | "reconcile";
   action?: "import" | "ignore" | "audit" | "reconcile";
+  learn_rename?: boolean;
 };
 
 export default function ImportarPage() {
@@ -190,8 +191,12 @@ export default function ImportarPage() {
                     <tr key={i} className={clsx(t.action === "ignore" && "opacity-45")}>
                       <td className="whitespace-nowrap px-4 py-2.5">{brDate(t.transaction_date)}</td>
                       <td className="px-4 py-2.5">
-                        <p className="font-medium">{t.description_clean}</p>
-                        <p className="max-w-xs truncate text-xs text-ink-500">{t.description_original}</p>
+                        <input
+                          className="input py-1.5 font-medium"
+                          value={t.description_clean}
+                          title="Edite o nome: o sistema aprende e usa este nome nas próximas importações"
+                          onChange={(e) => setRow(i, { description_clean: e.target.value, learn_rename: true })}
+                        />
                       </td>
                       <td className={clsx("whitespace-nowrap px-4 py-2.5 text-right font-semibold",
                         t.amount < 0 ? "text-danger-fg" : "text-success-fg")}>{brl(t.amount)}</td>
