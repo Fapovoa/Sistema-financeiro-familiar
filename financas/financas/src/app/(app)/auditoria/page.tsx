@@ -49,25 +49,28 @@ export default function AuditoriaPage() {
     const categoryId = c.category_id ?? item.suggested_category_id ?? null;
     const newName = (c.name ?? item.transactions.description_clean)?.trim();
 
-    await supabase.from("transactions").update({
+    const { error: upErr, data: upData } = await supabase.from("transactions").update({
       category_id: categoryId,
       type: (c.type as never) ?? item.transactions.type,
       is_recurring: c.recurring ?? item.transactions.is_recurring,
       description_clean: newName || item.transactions.description_clean,
       confidence_score: 1,
-    }).eq("id", item.transactions.id);
+    }).eq("id", item.transactions.id).select("id");
+    if (upErr) { setFlash(`ERRO ao gravar no banco: ${upErr.message}`); return; }
+    if (!upData || upData.length === 0) { setFlash("ERRO: o banco não retornou a linha atualizada (verifique permissões/RLS)."); return; }
 
     // Renomeou? Aprende: próximas importações desse estabelecimento já chegam com o novo nome
     if (newName && newName !== item.transactions.description_clean) {
       const np = normalizeDescription(item.transactions.description_original || item.transactions.description_clean);
       if (np.length >= 3) {
-        await supabase.from("rename_rules").upsert({
+        const { error: rnErr } = await supabase.from("rename_rules").upsert({
           user_id: FAMILY_USER_ID,
           pattern: item.transactions.description_original,
           normalized_pattern: np,
           new_name: newName,
           updated_at: new Date().toISOString(),
         }, { onConflict: "user_id,normalized_pattern" });
+        if (rnErr) setFlash(`Aviso: regra de renomeação não gravada (${rnErr.message}). Rode o SQL da tabela rename_rules.`);
       }
     }
 
@@ -75,7 +78,7 @@ export default function AuditoriaPage() {
     if (c.learn !== false && categoryId) {
       const normalized = normalizeDescription(item.transactions.description_clean || item.transactions.description_original);
       if (normalized.length >= 3) {
-        await supabase.from("categorization_rules").upsert({
+        const { error: catErr } = await supabase.from("categorization_rules").upsert({
           pattern: item.transactions.description_clean,
           normalized_pattern: normalized,
           category_id: categoryId,
@@ -83,6 +86,7 @@ export default function AuditoriaPage() {
           created_from_transaction_id: item.transactions.id,
           user_id: FAMILY_USER_ID,
         }, { onConflict: "user_id,normalized_pattern" });
+        if (catErr) setFlash(`Aviso: regra de categoria não gravada (${catErr.message}).`);
       }
     }
 
@@ -99,7 +103,8 @@ export default function AuditoriaPage() {
         .neq("id", item.transactions.id);
       const ids = (siblings ?? []).map((x) => x.id);
       if (ids.length) {
-        await supabase.from("transactions").update(propagate).in("id", ids);
+        const { error: propErr } = await supabase.from("transactions").update(propagate).in("id", ids);
+        if (propErr) { setFlash(`ERRO ao propagar para idênticos: ${propErr.message}`); return; }
         // Resolve também as pendências de auditoria dos irmãos idênticos
         await supabase.from("audit_items")
           .update({ status: "resolved", resolved_at: new Date().toISOString() })
@@ -109,7 +114,7 @@ export default function AuditoriaPage() {
     }
 
     await supabase.from("audit_items").update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", item.id);
-    setFlash(`“${newName || oldName}” resolvido — aplicado a todos os lançamentos idênticos e regra salva para as próximas importações.`);
+    setFlash(`“${newName || oldName}” resolvido — gravado no banco e aplicado a ${1 + (oldName ? (await supabase.from("transactions").select("id", { count: "exact", head: true }).eq("description_clean", newName || oldName)).count! - 1 : 0)} lançamento(s) idêntico(s).`);
     load();
   }
 
