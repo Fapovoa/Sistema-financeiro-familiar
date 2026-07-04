@@ -21,6 +21,7 @@ type IncomingTx = {
   installment_total: number | null;
   is_recurring_candidate: boolean;
   is_card_purchase: boolean;
+  learn_rename?: boolean;
   invoice_reference_month?: string | null;
   invoice_due_date?: string | null;
   affects_cash_flow: boolean;
@@ -134,6 +135,20 @@ export async function POST(req: NextRequest) {
 
   for (const t of transactions) {
     if (t.action === "ignore") { ignored++; continue; }
+
+    // Usuário renomeou na prévia: aprende a regra para as próximas importações
+    if (t.learn_rename && t.description_clean?.trim()) {
+      const np = normalizeDescription(t.description_original);
+      if (np.length >= 3) {
+        await supabase.from("rename_rules").upsert({
+          user_id: user.id,
+          pattern: t.description_original,
+          normalized_pattern: np,
+          new_name: t.description_clean.trim(),
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id,normalized_pattern" });
+      }
+    }
 
     // Reconciliação: pagamento de fatura no extrato -> marca fatura paga, não duplica despesa
     if (t.action === "reconcile" || t.type === "credit_card_payment") {
