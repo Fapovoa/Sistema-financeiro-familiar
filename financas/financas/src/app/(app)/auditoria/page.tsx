@@ -86,8 +86,30 @@ export default function AuditoriaPage() {
       }
     }
 
+    // Propaga para TODOS os lançamentos idênticos (passados e parcelas futuras já criadas)
+    const oldName = item.transactions.description_clean;
+    const propagate: Record<string, unknown> = {};
+    if (categoryId) propagate.category_id = categoryId;
+    if (newName && newName !== oldName) propagate.description_clean = newName;
+    if (Object.keys(propagate).length && oldName) {
+      const { data: siblings } = await supabase
+        .from("transactions")
+        .select("id")
+        .eq("description_clean", oldName)
+        .neq("id", item.transactions.id);
+      const ids = (siblings ?? []).map((x) => x.id);
+      if (ids.length) {
+        await supabase.from("transactions").update(propagate).in("id", ids);
+        // Resolve também as pendências de auditoria dos irmãos idênticos
+        await supabase.from("audit_items")
+          .update({ status: "resolved", resolved_at: new Date().toISOString() })
+          .in("transaction_id", ids)
+          .eq("status", "pending");
+      }
+    }
+
     await supabase.from("audit_items").update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", item.id);
-    setFlash(`“${item.transactions.description_clean}” resolvido — regra salva para os próximos parecidos.`);
+    setFlash(`“${newName || oldName}” resolvido — aplicado a todos os lançamentos idênticos e regra salva para as próximas importações.`);
     load();
   }
 
