@@ -1,142 +1,70 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createHash } from "crypto";
-// import direto do lib evita bug do pdf-parse que tenta ler arquivo de teste
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdf = require("pdf-parse/lib/pdf-parse.js");
-import { createClient } from "@/lib/supabase/server";
-import { FAMILY_USER_ID } from "@/lib/user";
-import { parsePdfText } from "@/lib/parsers";
-import { evaluateDuplicate, ExistingTx } from "@/lib/engine/dedupe";
-import { suggestCategory } from "@/lib/engine/categorize";
-import { normalizeDescription } from "@/lib/parsers/normalize";
+import { ParsedTransaction, ParseResult } from "./types";
+import { cleanDescription, monthPtToNum, parseBRL } from "./normalize";
+import { classifyType, suggestCategory, isRecurringCandidate } from "@/lib/engine/categorize";
 
-export const runtime = "nodejs";
-export const maxDuration = 60;
+// Com ou sem espaços:
+//   '1 de Janeiro de 2026 Saldo do dia: R$ 96,24'
+//   'Pix enviado: "Cp :10573521-Roberto" -R$ 19,00 R$ 96,24'  (1º valor = transação, 2º = saldo)
+// O "R$" antes de cada valor torna a leitura segura mesmo com texto grudado.
+const DAY = /^(\d{1,2})\s*de\s*([A-Za-zç]+)\s*de\s*(\d{4})\s*Saldo do dia/i;
+const TX = /^(Pix enviado|Pix recebido|Compra no debito|Compra Meio De Transporte|Pagamento efetuado|Pagamento de Convenio|Boleto de cobranca recebido|Pagamento recebido)\s*:\s*"?(.*?)"?\s*(-?)\s*R\$\s*([\d.]+,\d{2})\s*-?\s*R\$\s*[\d.]+,\d{2}\s*$/i;
 
-/**
- * POST /api/import/parse
- * FormData: file (PDF), document_type, account_id, reference_month
- * 1. valida usuário
- * 2. calcula hash do arquivo (bloqueia reimportação do mesmo PDF)
- * 3. extrai texto, roda o parser da instituição
- * 4. aplica regras de categorização do usuário
- * 5. marca duplicidades/reconciliações contra o banco
- * 6. devolve a prévia (nada é gravado aqui)
- */
-export async function POST(req: NextRequest) {
-  const supabase = await createClient();
-  const user = { id: FAMILY_USER_ID }; // autenticação desativada
+/** Extrato Banco Inter — robusto a texto com ou sem espaços. */
+export function parseInterExtrato(text: string): ParseResult {
+  const txs: ParsedTransaction[] = [];
+  const warnings: string[] = [];
+  let currentISO: string | null = null;
 
-  const form = await req.formData();
-  const file = form.get("file") as File | null;
-  const documentType = String(form.get("document_type") ?? "");
-  const accountId = String(form.get("account_id") ?? "");
-  if (!file) return NextResponse.json({ error: "Envie um arquivo PDF." }, { status: 400 });
+  for (const raw of text.split(/\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
 
-  const buf = Buffer.from(await file.arrayBuffer());
-  const fileHash = createHash("sha256").update(buf).digest("hex");
-
-  const { data: existingDoc } = await supabase
-    .from("documents")
-    .select("id, import_status, file_name")
-    .eq("file_hash", fileHash)
-    .maybeSingle();
-
-  let text = "";
-  try {
-    const parsed = await pdf(buf);
-    text = parsed.text ?? "";
-  } catch {
-    return NextResponse.json({ error: "Não foi possível ler o PDF." }, { status: 422 });
-  }
-
-  const result = parsePdfText(text);
-
-  // Regras de categorização aprendidas do usuário (camada 1)
-  const { data: rules } = await supabase
-    .from("categorization_rules")
-    .select("normalized_pattern, category_id, confidence");
-
-  // Regras de renomeação aprendidas (nome amigável escolhido pelo usuário)
-  const { data: renames } = await supabase
-    .from("rename_rules")
-    .select("normalized_pattern, new_name");
-
-  const { data: categories } = await supabase
-    .from("categories")
-    .select("id, name, type");
-  const catByName = new Map((categories ?? []).map((c) => [c.name.toLowerCase() + ":" + c.type, c.id]));
-
-  // Lançamentos existentes na janela de datas do documento (para dedupe)
-  const dates = result.transactions.map((t) => t.transaction_date).sort();
-  let existing: ExistingTx[] = [];
-  if (dates.length) {
-    const { data } = await supabase
-      .from("transactions")
-      .select("id, transaction_date, amount, description_clean, status, source, is_installment, installment_number")
-      .gte("transaction_date", dates[0])
-      .lte("transaction_date", dates[dates.length - 1]);
-    existing = (data as ExistingTx[]) ?? [];
-  }
-
-  const preview = result.transactions.map((t) => {
-    // aplica renomeação aprendida (o nome que o usuário escolheu prevalece)
-    let description_clean = t.description_clean;
-    const norm = normalizeDescription(t.description_original);
-    for (const r of renames ?? []) {
-      if (!r.normalized_pattern) continue;
-      if (norm.includes(r.normalized_pattern) || r.normalized_pattern.includes(norm)) {
-        description_clean = r.new_name;
-        break;
-      }
+    const d = line.match(DAY);
+    if (d) {
+      const mm = monthPtToNum(d[2]);
+      if (mm) currentISO = `${d[3]}-${mm}-${d[1].padStart(2, "0")}`;
+      continue;
     }
-    // camada 1: regra do usuário sobrepõe sugestão por keyword
-    const ruled = suggestCategory(t.description_original, (rules ?? []) as never);
-    let category_id: string | null = null;
-    let category_name = t.category_suggestion;
-    let confidence = t.confidence_score;
-    if (ruled.category_id) {
-      category_id = ruled.category_id;
-      confidence = ruled.confidence;
-      category_name = (categories ?? []).find((c) => c.id === ruled.category_id)?.name ?? category_name;
-    } else if (t.category_suggestion) {
-      const key = t.category_suggestion.toLowerCase() + ":" + (t.type === "income" ? "income" : "expense");
-      category_id = catByName.get(key) ?? null;
-    }
+    const m = line.match(TX);
+    if (!m || !currentISO) continue;
 
-    const dup = evaluateDuplicate(
-      { dateISO: t.transaction_date, amount: t.amount, desc: t.description_clean, installment_number: t.installment_number },
-      existing
-    );
-    const deduplication_status = t.deduplication_status === "reconcile" ? "reconcile" : dup.status;
-    const suggested_action =
-      deduplication_status === "possible_duplicate" ? "ignore"
-      : deduplication_status === "reconcile" ? "reconcile"
-      : confidence < 0.5 && t.type === "expense" ? "audit"
-      : t.suggested_action;
+    const [, kind, descRaw, neg, valRaw] = m;
+    let amount = parseBRL(valRaw);
+    if (!Number.isFinite(amount) || amount === 0) continue;
+    if (neg === "-") amount = -Math.abs(amount);
+    else if (/enviado|efetuado|debito|transporte|convenio/i.test(kind)) amount = -Math.abs(amount);
 
-    return { ...t, description_clean, category_id, category_suggestion: category_name, confidence_score: confidence, deduplication_status, duplicate_match_id: dup.matchId, suggested_action };
-  });
+    const desc = descRaw
+      .replace(/^Cp :\d+-?/, "")
+      .replace(/^No estabelecimento\s+/i, "")
+      .trim();
+    const full = `${kind}: ${desc}`;
+    const cat = suggestCategory(desc);
+    let { type } = classifyType(full, amount);
+    if (type === "transfer") type = amount < 0 ? "expense" : "income";
+    const isCardPay = /nu pagamentos|pagamento de fatura|fatura/i.test(desc) && /pagamento/i.test(kind);
+    // Receitas são preenchidas manualmente: entradas não entram na importação
+    if (amount > 0 && !isCardPay) continue;
 
-  return NextResponse.json({
-    already_imported: existingDoc?.import_status === "imported" ? existingDoc : null,
-    file_hash: fileHash,
-    file_name: file.name,
-    document_type: documentType || result.detected_type,
-    account_id: accountId || null,
-    detected: {
-      type: result.detected_type,
-      institution: result.detected_institution,
-      invoice: result.invoice ?? null,
-    },
-    warnings: result.warnings,
-    transactions: preview,
-    summary: {
-      found: preview.length,
-      new: preview.filter((t) => t.deduplication_status === "new").length,
-      duplicates: preview.filter((t) => t.deduplication_status === "possible_duplicate").length,
-      reconcile: preview.filter((t) => t.deduplication_status === "reconcile").length,
-      audit: preview.filter((t) => t.suggested_action === "audit").length,
-    },
-  });
+    txs.push({
+      transaction_date: currentISO,
+      description_original: full,
+      description_clean: cleanDescription(desc),
+      amount,
+      type: isCardPay ? "credit_card_payment" : type,
+      category_suggestion: cat.category,
+      confidence_score: cat.confidence,
+      is_installment: false,
+      installment_number: null,
+      installment_total: null,
+      is_recurring_candidate: isRecurringCandidate(desc),
+      is_card_purchase: false,
+      affects_cash_flow: true,
+      affects_category_report: !isCardPay,
+      deduplication_status: isCardPay ? "reconcile" : "new",
+      suggested_action: isCardPay ? "reconcile" : cat.confidence < 0.5 && type === "expense" ? "audit" : "import",
+    });
+  }
+  if (txs.length === 0) warnings.push("Nenhum lançamento reconhecido no extrato Inter. [parser v3]");
+  return { detected_type: "bank_statement", detected_institution: "Banco Inter (v3)", transactions: txs, warnings };
 }
