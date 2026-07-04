@@ -25,7 +25,7 @@ export default function AuditoriaPage() {
   const supabase = createClient();
   const [items, setItems] = useState<Item[]>([]);
   const [cats, setCats] = useState<{ id: string; name: string; type: string }[]>([]);
-  const [choice, setChoice] = useState<Record<string, { category_id?: string; type?: string; recurring?: boolean; learn: boolean }>>({});
+  const [choice, setChoice] = useState<Record<string, { category_id?: string; type?: string; recurring?: boolean; learn: boolean; name?: string }>>({});
   const [flash, setFlash] = useState<string | null>(null);
 
   async function load() {
@@ -40,20 +40,36 @@ export default function AuditoriaPage() {
   }
   useEffect(() => { load(); }, []);
 
-  function setC(id: string, patch: Partial<{ category_id: string; type: string; recurring: boolean; learn: boolean }>) {
+  function setC(id: string, patch: Partial<{ category_id: string; type: string; recurring: boolean; learn: boolean; name: string }>) {
     setChoice((s) => ({ ...s, [id]: { ...{ learn: true }, ...s[id], ...patch } }));
   }
 
   async function resolve(item: Item) {
     const c = choice[item.id] ?? { learn: true };
     const categoryId = c.category_id ?? item.suggested_category_id ?? null;
+    const newName = (c.name ?? item.transactions.description_clean)?.trim();
 
     await supabase.from("transactions").update({
       category_id: categoryId,
       type: (c.type as never) ?? item.transactions.type,
       is_recurring: c.recurring ?? item.transactions.is_recurring,
+      description_clean: newName || item.transactions.description_clean,
       confidence_score: 1,
     }).eq("id", item.transactions.id);
+
+    // Renomeou? Aprende: próximas importações desse estabelecimento já chegam com o novo nome
+    if (newName && newName !== item.transactions.description_clean) {
+      const np = normalizeDescription(item.transactions.description_original || item.transactions.description_clean);
+      if (np.length >= 3) {
+        await supabase.from("rename_rules").upsert({
+          user_id: FAMILY_USER_ID,
+          pattern: item.transactions.description_original,
+          normalized_pattern: np,
+          new_name: newName,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id,normalized_pattern" });
+      }
+    }
 
     // Aprendizado: correção vira regra para descrições semelhantes
     if (c.learn !== false && categoryId) {
@@ -103,7 +119,10 @@ export default function AuditoriaPage() {
             <div key={it.id} className="card grid grid-cols-1 gap-4 p-5 lg:grid-cols-[1fr_auto]">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-semibold">{it.transactions.description_clean}</span>
+                  <input className="input w-64 py-1.5 font-semibold"
+                    value={choice[it.id]?.name ?? it.transactions.description_clean}
+                    title="Edite o nome: o sistema aprende e usa esse nome nas próximas importações"
+                    onChange={(e) => setC(it.id, { name: e.target.value })} />
                   <span className={clsx("font-bold", it.transactions.amount < 0 ? "text-danger-fg" : "text-success-fg")}>
                     {brl(it.transactions.amount)}
                   </span>
@@ -113,7 +132,6 @@ export default function AuditoriaPage() {
                     <span className="text-xs text-ink-500">confiança {(Number(it.confidence_score) * 100).toFixed(0)}%</span>
                   )}
                 </div>
-                <p className="mt-1 truncate text-xs text-ink-500">Original: {it.transactions.description_original}</p>
 
                 <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <label className="text-sm">
