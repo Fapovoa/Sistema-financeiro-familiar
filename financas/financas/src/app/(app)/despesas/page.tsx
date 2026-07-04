@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Header } from "@/components/layout/Header";
+import { ManualExpenseForm } from "@/components/ManualExpenseForm";
 import { createClient } from "@/lib/supabase/server";
 import { brl, brDate } from "@/lib/format";
 import clsx from "clsx";
@@ -54,6 +55,7 @@ export default async function DespesasPage({ searchParams }: { searchParams: Pro
     <>
       <Header title="Despesas" />
       <div className="space-y-5 p-6">
+        <ManualExpenseForm />
         <div className="card flex flex-wrap items-center gap-3 p-4">
           <div className="flex rounded-full bg-slate-100 p-1 text-sm font-semibold">
             <Link href={mkHref({ view: "caixa" })}
