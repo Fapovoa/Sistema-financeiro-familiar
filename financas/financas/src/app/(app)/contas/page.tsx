@@ -2,9 +2,8 @@
 import { useEffect, useState } from "react";
 import { Header } from "@/components/layout/Header";
 import { createClient } from "@/lib/supabase/client";
-import { FAMILY_USER_ID } from "@/lib/user";
 import { brl } from "@/lib/format";
-import { Landmark, CreditCard, PiggyBank, Wallet, TrendingUp, Plus, Trash2, Pencil, X } from "lucide-react";
+import { Landmark, CreditCard, PiggyBank, Wallet, TrendingUp, UtensilsCrossed, Plus, Trash2, Pencil, X } from "lucide-react";
 import clsx from "clsx";
 
 const TYPES = [
@@ -13,6 +12,7 @@ const TYPES = [
   { v: "credit_card", label: "Cartão de crédito", icon: CreditCard },
   { v: "cash", label: "Dinheiro", icon: Wallet },
   { v: "investment", label: "Investimento", icon: TrendingUp },
+  { v: "benefit", label: "Benefício (pré-pago)", icon: UtensilsCrossed },
 ] as const;
 
 type Account = {
@@ -50,7 +50,7 @@ export default function ContasPage() {
     e.preventDefault();
     setMsg(null);
     const payload = {
-      user_id: FAMILY_USER_ID,
+      id: editing ?? undefined,
       name: form.name.trim(),
       type: form.type,
       institution: form.institution.trim() || null,
@@ -59,17 +59,29 @@ export default function ContasPage() {
       due_day: form.type === "credit_card" && form.due_day ? parseInt(form.due_day) : null,
       credit_limit: form.type === "credit_card" && form.credit_limit ? parseFloat(form.credit_limit.replace(",", ".")) : null,
     };
-    const { error } = editing
-      ? await supabase.from("accounts").update(payload).eq("id", editing)
-      : await supabase.from("accounts").insert(payload);
-    if (error) return setMsg(error.message);
+    const res = await fetch("/api/accounts", {
+      method: editing ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      return setMsg(`ERRO ao gravar: ${j.error ?? res.statusText}`);
+    }
     setForm({ ...EMPTY }); setEditing(null); load();
   }
 
   async function remove(a: Account) {
     if (!confirm(`Excluir "${a.name}"? Os lançamentos já importados não são apagados, mas perdem o vínculo com esta conta.`)) return;
-    const { error } = await supabase.from("accounts").delete().eq("id", a.id);
-    if (error) setMsg(error.message);
+    const res = await fetch("/api/accounts", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: a.id }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setMsg(`ERRO ao excluir: ${j.error ?? res.statusText}`);
+    }
     load();
   }
 
@@ -121,7 +133,7 @@ export default function ContasPage() {
             return (
               <div key={a.id} className={clsx("card flex items-start gap-3 p-5", editing === a.id && "ring-2 ring-brand-500")}>
                 <span className={clsx("grid h-11 w-11 shrink-0 place-items-center rounded-xl text-white",
-                  a.type === "credit_card" ? "bg-brand-500" : "bg-ink-700")}>
+                  a.type === "credit_card" ? "bg-brand-500" : a.type === "benefit" ? "bg-emerald-500" : "bg-ink-700")}>
                   <Icon size={19} />
                 </span>
                 <div className="min-w-0 flex-1">
