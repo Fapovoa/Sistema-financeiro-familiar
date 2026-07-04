@@ -109,7 +109,6 @@ export default async function DespesasPage({ searchParams }: { searchParams: Pro
                   <td className="whitespace-nowrap px-4 py-2.5">{brDate(t.transaction_date)}</td>
                   <td className="px-4 py-2.5">
                     <p className="font-medium">{t.description_clean}</p>
-                    <p className="max-w-md truncate text-xs text-ink-500">{t.description_original}</p>
                   </td>
                   <td className="px-4 py-2.5">
                     <span className="inline-flex items-center gap-1.5">
