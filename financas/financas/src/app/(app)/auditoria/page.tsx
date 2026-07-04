@@ -2,9 +2,7 @@
 import { useEffect, useState } from "react";
 import { Header } from "@/components/layout/Header";
 import { createClient } from "@/lib/supabase/client";
-import { FAMILY_USER_ID } from "@/lib/user";
 import { brl, brDate } from "@/lib/format";
-import { normalizeDescription } from "@/lib/parsers/normalize";
 import { CheckCircle2, EyeOff, ShieldCheck } from "lucide-react";
 import clsx from "clsx";
 
@@ -17,16 +15,17 @@ type Item = {
 };
 
 /**
- * Auditoria: resolve lançamentos duvidosos.
- * Ao confirmar uma categoria, salva uma regra em categorization_rules —
- * lançamentos futuros com descrição parecida serão categorizados sozinhos.
+ * Auditoria: as gravações são feitas pelo SERVIDOR (rota /api/audit/resolve),
+ * imune a bloqueios do navegador. Classificar propaga para todos os idênticos
+ * e salva regras de categoria/renomeação para as próximas importações.
  */
 export default function AuditoriaPage() {
   const supabase = createClient();
   const [items, setItems] = useState<Item[]>([]);
   const [cats, setCats] = useState<{ id: string; name: string; type: string }[]>([]);
   const [choice, setChoice] = useState<Record<string, { category_id?: string; type?: string; recurring?: boolean; learn: boolean; name?: string }>>({});
-  const [flash, setFlash] = useState<string | null>(null);
+  const [flash, setFlash] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
   async function load() {
     const [{ data: a }, { data: c }] = await Promise.all([
@@ -44,83 +43,34 @@ export default function AuditoriaPage() {
     setChoice((s) => ({ ...s, [id]: { ...{ learn: true }, ...s[id], ...patch } }));
   }
 
-  async function resolve(item: Item) {
+  async function call(action: "resolve" | "ignore", item: Item) {
     const c = choice[item.id] ?? { learn: true };
-    const categoryId = c.category_id ?? item.suggested_category_id ?? null;
-    const newName = (c.name ?? item.transactions.description_clean)?.trim();
-
-    const { error: upErr, data: upData } = await supabase.from("transactions").update({
-      category_id: categoryId,
-      type: (c.type as never) ?? item.transactions.type,
-      is_recurring: c.recurring ?? item.transactions.is_recurring,
-      description_clean: newName || item.transactions.description_clean,
-      confidence_score: 1,
-    }).eq("id", item.transactions.id).select("id");
-    if (upErr) { setFlash(`ERRO ao gravar no banco: ${upErr.message}`); return; }
-    if (!upData || upData.length === 0) { setFlash("ERRO: o banco não retornou a linha atualizada (verifique permissões/RLS)."); return; }
-
-    // Renomeou? Aprende: próximas importações desse estabelecimento já chegam com o novo nome
-    if (newName && newName !== item.transactions.description_clean) {
-      const np = normalizeDescription(item.transactions.description_original || item.transactions.description_clean);
-      if (np.length >= 3) {
-        const { error: rnErr } = await supabase.from("rename_rules").upsert({
-          user_id: FAMILY_USER_ID,
-          pattern: item.transactions.description_original,
-          normalized_pattern: np,
-          new_name: newName,
-          updated_at: new Date().toISOString(),
-        }, { onConflict: "user_id,normalized_pattern" });
-        if (rnErr) setFlash(`Aviso: regra de renomeação não gravada (${rnErr.message}). Rode o SQL da tabela rename_rules.`);
-      }
-    }
-
-    // Aprendizado: correção vira regra para descrições semelhantes
-    if (c.learn !== false && categoryId) {
-      const normalized = normalizeDescription(item.transactions.description_clean || item.transactions.description_original);
-      if (normalized.length >= 3) {
-        const { error: catErr } = await supabase.from("categorization_rules").upsert({
-          pattern: item.transactions.description_clean,
-          normalized_pattern: normalized,
-          category_id: categoryId,
-          confidence: 1,
-          created_from_transaction_id: item.transactions.id,
-          user_id: FAMILY_USER_ID,
-        }, { onConflict: "user_id,normalized_pattern" });
-        if (catErr) setFlash(`Aviso: regra de categoria não gravada (${catErr.message}).`);
-      }
-    }
-
-    // Propaga para TODOS os lançamentos idênticos (passados e parcelas futuras já criadas)
-    const oldName = item.transactions.description_clean;
-    const propagate: Record<string, unknown> = {};
-    if (categoryId) propagate.category_id = categoryId;
-    if (newName && newName !== oldName) propagate.description_clean = newName;
-    if (Object.keys(propagate).length && oldName) {
-      const { data: siblings } = await supabase
-        .from("transactions")
-        .select("id")
-        .eq("description_clean", oldName)
-        .neq("id", item.transactions.id);
-      const ids = (siblings ?? []).map((x) => x.id);
-      if (ids.length) {
-        const { error: propErr } = await supabase.from("transactions").update(propagate).in("id", ids);
-        if (propErr) { setFlash(`ERRO ao propagar para idênticos: ${propErr.message}`); return; }
-        // Resolve também as pendências de auditoria dos irmãos idênticos
-        await supabase.from("audit_items")
-          .update({ status: "resolved", resolved_at: new Date().toISOString() })
-          .in("transaction_id", ids)
-          .eq("status", "pending");
-      }
-    }
-
-    await supabase.from("audit_items").update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", item.id);
-    setFlash(`“${newName || oldName}” resolvido — gravado no banco e aplicado a ${1 + (oldName ? (await supabase.from("transactions").select("id", { count: "exact", head: true }).eq("description_clean", newName || oldName)).count! - 1 : 0)} lançamento(s) idêntico(s).`);
-    load();
-  }
-
-  async function ignore(item: Item) {
-    await supabase.from("transactions").update({ status: "ignored", type: "ignored" }).eq("id", item.transactions.id);
-    await supabase.from("audit_items").update({ status: "ignored", resolved_at: new Date().toISOString() }).eq("id", item.id);
+    setBusy(item.id); setFlash(null);
+    const res = await fetch("/api/audit/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action,
+        audit_id: item.id,
+        transaction_id: item.transactions.id,
+        category_id: c.category_id ?? item.suggested_category_id ?? null,
+        type: c.type ?? item.transactions.type,
+        recurring: c.recurring ?? item.transactions.is_recurring,
+        learn: c.learn !== false,
+        new_name: c.name ?? null,
+        old_name: item.transactions.description_clean,
+        description_original: item.transactions.description_original,
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    setBusy(null);
+    if (!res.ok) return setFlash({ ok: false, text: `ERRO ao gravar: ${json.error ?? res.statusText}` });
+    setFlash({
+      ok: true,
+      text: action === "ignore"
+        ? "Lançamento ignorado."
+        : `"${(c.name ?? item.transactions.description_clean)?.trim()}" gravado no banco — aplicado a ${json.applied} lançamento(s) idêntico(s) e regra salva para as próximas importações.`,
+    });
     load();
   }
 
@@ -130,14 +80,17 @@ export default function AuditoriaPage() {
       <div className="space-y-4 p-6">
         <p className="flex items-center gap-2 text-sm text-ink-500">
           <ShieldCheck size={16} className="text-brand-600" />
-          Lançamentos que o sistema não conseguiu classificar com segurança. Cada correção vira regra de categorização automática.
+          Lançamentos que o sistema não conseguiu classificar com segurança. Cada correção vira regra e se aplica a todos os lançamentos idênticos.
         </p>
-        {flash && <p className="rounded-xl bg-success-bg px-4 py-3 text-sm text-success-fg">{flash}</p>}
+        {flash && (
+          <p className={clsx("rounded-xl px-4 py-3 text-sm",
+            flash.ok ? "bg-success-bg text-success-fg" : "bg-danger-bg text-danger-fg")}>
+            {flash.text}
+          </p>
+        )}
 
         {items.length === 0 && (
-          <div className="card p-10 text-center text-sm text-ink-500">
-            Nada pendente de auditoria. 🎉
-          </div>
+          <div className="card p-10 text-center text-sm text-ink-500">Nada pendente de auditoria. 🎉</div>
         )}
 
         {items.map((it) => {
@@ -147,7 +100,7 @@ export default function AuditoriaPage() {
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <input className="input w-64 py-1.5 font-semibold"
-                    value={choice[it.id]?.name ?? it.transactions.description_clean}
+                    value={c.name ?? it.transactions.description_clean}
                     title="Edite o nome: o sistema aprende e usa esse nome nas próximas importações"
                     onChange={(e) => setC(it.id, { name: e.target.value })} />
                   <span className={clsx("font-bold", it.transactions.amount < 0 ? "text-danger-fg" : "text-success-fg")}>
@@ -187,7 +140,7 @@ export default function AuditoriaPage() {
                         onChange={(e) => setC(it.id, { recurring: e.target.checked })} />
                       Recorrente
                     </label>
-                    <label className="flex items-center gap-2" title="Salvar regra para categorizar descrições parecidas automaticamente">
+                    <label className="flex items-center gap-2" title="Salvar regras para categorizar/renomear automaticamente">
                       <input type="checkbox" checked={c.learn}
                         onChange={(e) => setC(it.id, { learn: e.target.checked })} />
                       Aprender regra
@@ -197,10 +150,10 @@ export default function AuditoriaPage() {
               </div>
 
               <div className="flex items-start gap-2 lg:flex-col">
-                <button className="btn-primary" onClick={() => resolve(it)}>
-                  <CheckCircle2 size={16} /> Confirmar
+                <button className="btn-primary" disabled={busy === it.id} onClick={() => call("resolve", it)}>
+                  <CheckCircle2 size={16} /> {busy === it.id ? "Gravando…" : "Confirmar"}
                 </button>
-                <button className="btn-ghost" onClick={() => ignore(it)}>
+                <button className="btn-ghost" disabled={busy === it.id} onClick={() => call("ignore", it)}>
                   <EyeOff size={16} /> Ignorar lançamento
                 </button>
               </div>
