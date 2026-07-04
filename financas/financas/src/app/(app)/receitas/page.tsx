@@ -5,6 +5,9 @@ import { createClient } from "@/lib/supabase/client";
 import { brl, brDate } from "@/lib/format";
 import { Plus, Trash2 } from "lucide-react";
 import clsx from "clsx";
+import {
+  startOfMonth, endOfMonth, startOfYear, endOfYear, subMonths, format,
+} from "date-fns";
 
 const STATUS = [
   { v: "paid", label: "Recebida", cls: "bg-success-bg text-success-fg" },
@@ -13,6 +16,37 @@ const STATUS = [
   { v: "ignored", label: "Cancelada", cls: "bg-slate-100 text-ink-500" },
 ];
 
+// Períodos fixos + "Tudo" + Personalizado.
+const PERIODS = [
+  { key: "mes", label: "Mês atual" },
+  { key: "mes-passado", label: "Mês passado" },
+  { key: "3m", label: "Último trimestre" },
+  { key: "6m", label: "Último semestre" },
+  { key: "ano", label: "Ano atual" },
+  { key: "tudo", label: "Tudo" },
+  { key: "personalizado", label: "Personalizado" },
+] as const;
+
+// Retorna o intervalo (ou null = sem filtro de data, opção "Tudo").
+function resolvePeriodo(periodo: string, de: string, ate: string): { startISO: string; endISO: string } | null {
+  if (periodo === "tudo") return null;
+  const hoje = new Date();
+  let start: Date, end: Date;
+  switch (periodo) {
+    case "mes-passado": { const ref = subMonths(hoje, 1); start = startOfMonth(ref); end = endOfMonth(ref); break; }
+    case "3m": start = startOfMonth(subMonths(hoje, 2)); end = endOfMonth(hoje); break;
+    case "6m": start = startOfMonth(subMonths(hoje, 5)); end = endOfMonth(hoje); break;
+    case "ano": start = startOfYear(hoje); end = endOfYear(hoje); break;
+    case "personalizado": {
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(de) ? new Date(de + "T12:00:00") : startOfMonth(hoje);
+      const a = /^\d{4}-\d{2}-\d{2}$/.test(ate) ? new Date(ate + "T12:00:00") : endOfMonth(hoje);
+      start = d <= a ? d : a; end = d <= a ? a : d; break;
+    }
+    default: start = startOfMonth(hoje); end = endOfMonth(hoje);
+  }
+  return { startISO: format(start, "yyyy-MM-dd"), endISO: format(end, "yyyy-MM-dd") };
+}
+
 /** Receitas: cadastro manual. Recorrentes são projetadas automaticamente (3 meses, status previsto). */
 export default function ReceitasPage() {
   const supabase = createClient();
@@ -20,25 +54,43 @@ export default function ReceitasPage() {
   const [cats, setCats] = useState<{ id: string; name: string }[]>([]);
   const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
   const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Filtro de período
+  const [periodo, setPeriodo] = useState<string>("mes");
+  const [de, setDe] = useState("");
+  const [ate, setAte] = useState("");
+
   const [form, setForm] = useState({
     date: new Date().toISOString().slice(0, 10),
     description: "", amount: "", category_id: "", account_id: "",
     recurring: false, frequency: "monthly", status: "paid", notes: "",
   });
 
-  async function load() {
-    const [{ data: t }, { data: c }, { data: a }] = await Promise.all([
-      supabase.from("transactions")
-        .select("id, transaction_date, description_clean, amount, status, is_recurring, notes, categories(name, color), accounts(name)")
-        .eq("type", "income").order("transaction_date", { ascending: false }).limit(200),
+  async function load(p = periodo, d = de, a = ate) {
+    let tq = supabase.from("transactions")
+      .select("id, transaction_date, description_clean, amount, status, is_recurring, notes, categories(name, color), accounts(name)")
+      .eq("type", "income")
+      .order("transaction_date", { ascending: false })
+      .limit(500);
+    const range = resolvePeriodo(p, d, a);
+    if (range) tq = tq.gte("transaction_date", range.startISO).lte("transaction_date", range.endISO);
+
+    const [{ data: t }, { data: c }, { data: ac }] = await Promise.all([
+      tq,
       supabase.from("categories").select("id, name").eq("type", "income").order("name"),
       supabase.from("accounts").select("id, name").order("name"),
     ]);
-    setRows(t ?? []); setCats(c ?? []); setAccounts(a ?? []);
+    setRows(t ?? []); setCats(c ?? []); setAccounts(ac ?? []);
   }
   useEffect(() => { load(); }, []);
 
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  function onPeriodo(v: string) {
+    setPeriodo(v);
+    if (v !== "personalizado") load(v, de, ate); // presets aplicam na hora
+  }
+
+  const totalPeriodo = rows.reduce((s, r) => s + Number(r.amount), 0);
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
@@ -113,6 +165,28 @@ export default function ReceitasPage() {
           </div>
         </form>
 
+        {/* Filtro de período */}
+        <div className="card flex flex-wrap items-end gap-3 p-4">
+          <label className="text-sm">
+            <span className="mb-1 block font-medium">Período</span>
+            <select className="input w-auto" value={periodo} onChange={(e) => onPeriodo(e.target.value)}>
+              {PERIODS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+            </select>
+          </label>
+          {periodo === "personalizado" && (
+            <>
+              <label className="text-sm"><span className="mb-1 block font-medium">De</span>
+                <input type="date" className="input w-auto" value={de} onChange={(e) => setDe(e.target.value)} /></label>
+              <label className="text-sm"><span className="mb-1 block font-medium">Até</span>
+                <input type="date" className="input w-auto" value={ate} onChange={(e) => setAte(e.target.value)} /></label>
+              <button type="button" className="btn-ghost" onClick={() => load("personalizado", de, ate)}>Aplicar</button>
+            </>
+          )}
+          <p className="ml-auto text-sm text-ink-500">
+            Total do período: <b className="text-success-fg">{brl(totalPeriodo)}</b> · {rows.length} receitas
+          </p>
+        </div>
+
         <div className="card overflow-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-ink-500">
@@ -144,7 +218,7 @@ export default function ReceitasPage() {
                   </tr>
                 );
               })}
-              {rows.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-ink-500">Nenhuma receita cadastrada.</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-ink-500">Nenhuma receita no período.</td></tr>}
             </tbody>
           </table>
         </div>
