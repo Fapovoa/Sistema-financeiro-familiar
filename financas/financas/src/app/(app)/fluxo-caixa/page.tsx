@@ -30,12 +30,13 @@ type Tx = {
 const isRealizado = (s: string) => s === "paid" || s === "confirmed";
 const isPrevisto = (s: string) => s === "forecast" || s === "pending";
 
-// Cores: recebido (verde escuro/claro) e pago (azul escuro/claro)
+// Cores: receita = verde-limão (RGB 191,255,0); despesa = rosa (RGB 247,74,242).
+// Tom cheio = realizado; tom claro = previsto.
 const COLORS = {
-  recebReal: "#16A34A",
-  recebPrev: "#86EFAC",
-  pagReal: "#4A6CF7",
-  pagPrev: "#C7D2FE",
+  recebReal: "#BFFF00",
+  recebPrev: "#DFFF80",
+  pagReal: "#F74AF2",
+  pagPrev: "#FBA5F9",
 };
 
 const NOMES: Record<string, string> = {
@@ -56,7 +57,7 @@ function Etiqueta({ previsto }: { previsto: boolean }) {
 
 /**
  * Fluxo de caixa diário, interativo:
- * - Barras por data: a receber (verde) × a pagar (azul); tom claro = previsto, tom escuro = realizado.
+ * - Barras por data: a receber (verde-limão) × a pagar (rosa); tom claro = previsto, tom cheio = realizado.
  * - Clique numa barra ou numa linha da tabela para ver o detalhamento do dia.
  * Regra obrigatória: só entra o que impacta o caixa (affects_cash_flow=true) —
  * compras individuais do cartão ficam de fora; a fatura entra consolidada no vencimento.
@@ -166,7 +167,7 @@ export default function FluxoCaixaPage() {
         <div className="card p-5">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h2 className="font-bold">A receber × a pagar, data a data</h2>
-            <p className="text-xs text-ink-500">Tom escuro = realizado · tom claro = previsto · clique numa barra para ver o detalhe do dia</p>
+            <p className="text-xs text-ink-500">Tom cheio = realizado · tom claro = previsto · clique numa barra para ver o detalhe do dia</p>
           </div>
           {loading ? (
             <p className="py-10 text-center text-sm text-ink-500">Carregando…</p>
@@ -184,7 +185,7 @@ export default function FluxoCaixaPage() {
                     tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : String(v))} />
                   <Tooltip formatter={(v: number, name: string) => [brl(v), NOMES[name] ?? name]}
                     labelFormatter={(l) => `Dia ${l} — clique para detalhar`}
-                    cursor={{ fill: "rgba(74,108,247,0.06)" }} />
+                    cursor={{ fill: "rgba(100,116,139,0.06)" }} />
                   <Legend iconType="circle" formatter={(v: string) => NOMES[v] ?? v} />
                   <Bar dataKey="recebReal" stackId="r" fill={COLORS.recebReal} radius={[0, 0, 0, 0]} cursor="pointer" />
                   <Bar dataKey="recebPrev" stackId="r" fill={COLORS.recebPrev} radius={[6, 6, 0, 0]} cursor="pointer" />
