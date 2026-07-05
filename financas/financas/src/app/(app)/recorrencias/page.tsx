@@ -1,64 +1,114 @@
 "use client";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import { Header } from "@/components/layout/Header";
+import { createClient } from "@/lib/supabase/client";
+import { brl, brDate } from "@/lib/format";
+import { Plus, Trash2, Pencil, X, Play, Pause } from "lucide-react";
 import clsx from "clsx";
-import {
-  LayoutGrid, ArrowLeftRight, CreditCard, Upload, TrendingUp,
-  Wallet, CalendarRange, ShieldAlert, Landmark, Tags, Sparkles, Repeat,
-} from "lucide-react";
 
-const NAV = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutGrid },
-  { href: "/importar", label: "Importar PDFs", icon: Upload },
-  { href: "/despesas", label: "Despesas", icon: ArrowLeftRight },
-  { href: "/cartoes", label: "Cartões", icon: CreditCard },
-  { href: "/receitas", label: "Receitas", icon: TrendingUp },
-  { href: "/recorrencias", label: "Recorrências", icon: Repeat },
-  { href: "/fluxo-caixa", label: "Fluxo de caixa", icon: CalendarRange },
-  { href: "/auditoria", label: "Auditoria", icon: ShieldAlert },
-  { href: "/contas", label: "Contas & cartões", icon: Landmark },
-  { href: "/categorias", label: "Categorias", icon: Tags },
-];
+type Rule = {
+  id: string; kind: "expense" | "income"; description: string; amount: number;
+  category_id: string | null; account_id: string | null;
+  day_of_month: number; start_date: string; end_date: string | null;
+  months_ahead: number; active: boolean; notes: string | null;
+  categories?: { name: string; color: string | null } | null;
+  accounts?: { name: string } | null;
+};
 
-export function Sidebar({ auditCount = 0 }: { auditCount?: number }) {
-  const path = usePathname();
-  return (
-    <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-slate-100 bg-white px-4 py-5 lg:flex">
-      <Link href="/dashboard" className="mb-6 flex items-center gap-2 px-2">
-        <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-500 text-white"><Wallet size={18} /></span>
-        <span className="text-lg font-bold tracking-tight">Finanças</span>
-      </Link>
+const EMPTY = {
+  kind: "expense" as "expense" | "income",
+  description: "", amount: "", category_id: "", account_id: "",
+  day_of_month: "1", start_date: new Date().toISOString().slice(0, 10),
+  end_date: "", months_ahead: "3", notes: "",
+};
 
-      <Link href="/importar"
-        className="mb-4 rounded-full border border-brand-100 px-4 py-2 text-sm font-medium text-brand-600 transition hover:bg-brand-50">
-        <span className="inline-flex items-center gap-2"><Sparkles size={14} /> Importação inteligente</span>
-      </Link>
+/**
+ * Recorrências: contas fixas (receitas e despesas) com período de vigência.
+ * As previsões futuras são geradas pelo servidor (status=previsto) e aparecem
+ * no Fluxo de caixa. Inativar apaga as previsões futuras; reativar recria.
+ */
+export default function RecorrenciasPage() {
+  const supabase = createClient();
+  const [rules, setRules] = useState<Rule[]>([]);
+  const [cats, setCats] = useState<{ id: string; name: string; type: string }[]>([]);
+  const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
+  const [form, setForm] = useState({ ...EMPTY });
+  const [editing, setEditing] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-      <nav className="flex-1 space-y-1">
-        {NAV.map(({ href, label, icon: Icon }) => {
-          const active = path.startsWith(href);
-          return (
-            <Link key={href} href={href}
-              className={clsx(
-                "flex items-center justify-between rounded-xl px-3 py-2.5 text-sm font-medium transition",
-                active ? "bg-brand-50 text-brand-600" : "text-ink-700 hover:bg-slate-50"
-              )}>
-              <span className="flex items-center gap-3"><Icon size={17} /> {label}</span>
-              {href === "/auditoria" && auditCount > 0 && (
-                <span className="rounded-full bg-danger-bg px-2 py-0.5 text-xs font-semibold text-danger-fg">{auditCount}</span>
-              )}
-            </Link>
-          );
-        })}
-      </nav>
+  async function load() {
+    const [{ data: r }, { data: c }, { data: a }] = await Promise.all([
+      supabase.from("recurrences")
+        .select("*, categories(name, color), accounts(name)")
+        .order("active", { ascending: false })
+        .order("day_of_month"),
+      supabase.from("categories").select("id, name, type").order("name"),
+      supabase.from("accounts").select("id, name").neq("type", "credit_card").order("name"),
+    ]);
+    setRules((r as Rule[]) ?? []); setCats(c ?? []); setAccounts(a ?? []);
+  }
+  useEffect(() => { load(); }, []);
 
-      <div className="rounded-2xl bg-brand-500 p-4 text-white">
-        <p className="text-sm font-semibold">Saúde financeira</p>
-        <p className="mt-1 text-xs text-brand-100">Importe seus PDFs e deixe o sistema categorizar por você.</p>
-        <Link href="/importar" className="mt-3 block rounded-full bg-white/15 px-3 py-1.5 text-center text-xs font-semibold hover:bg-white/25">
-          Importar agora
-        </Link>
-      </div>
-    </aside>
-  );
-}
+  function startEdit(r: Rule) {
+    setEditing(r.id);
+    setForm({
+      kind: r.kind, description: r.description,
+      amount: String(r.amount).replace(".", ","),
+      category_id: r.category_id ?? "", account_id: r.account_id ?? "",
+      day_of_month: String(r.day_of_month), start_date: r.start_date,
+      end_date: r.end_date ?? "", months_ahead: String(r.months_ahead), notes: r.notes ?? "",
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function payloadFromForm(extra: Partial<Rule> = {}) {
+    return {
+      id: editing ?? undefined,
+      kind: form.kind,
+      description: form.description,
+      amount: parseFloat(form.amount.replace(/\./g, "").replace(",", ".")),
+      category_id: form.category_id || null,
+      account_id: form.account_id || null,
+      day_of_month: parseInt(form.day_of_month, 10),
+      start_date: form.start_date,
+      end_date: form.end_date || null,
+      months_ahead: parseInt(form.months_ahead, 10) || 3,
+      active: true,
+      notes: form.notes || null,
+      ...extra,
+    };
+  }
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true); setMsg(null);
+    const res = await fetch("/api/recurrences", {
+      method: editing ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payloadFromForm(editing ? { active: rules.find((r) => r.id === editing)?.active ?? true } : {})),
+    });
+    const json = await res.json().catch(() => ({}));
+    setSaving(false);
+    if (!res.ok) return setMsg({ ok: false, text: `ERRO ao gravar: ${json.error ?? res.statusText}` });
+    setMsg({ ok: true, text: editing ? `Recorrência atualizada — ${json.forecasts} previsões futuras regeradas.` : `Recorrência criada — ${json.forecasts} previsões lançadas no caixa.` });
+    setForm({ ...EMPTY }); setEditing(null); load();
+  }
+
+  async function toggleActive(r: Rule) {
+    setBusy(r.id); setMsg(null);
+    const res = await fetch("/api/recurrences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: r.id, kind: r.kind, description: r.description, amount: r.amount,
+        category_id: r.category_id, account_id: r.account_id,
+        day_of_month: r.day_of_month, start_date: r.start_date, end_date: r.end_date,
+        months_ahead: r.months_ahead, active: !r.active, notes: r.notes,
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    setBusy(null);
+    if (!res.ok) return setMsg({ ok: false, text: `ERRO: ${json.error ?? res.statusText}` });
+    setMsg({ ok: true, text: r.active ? "Recorrência inativada —
