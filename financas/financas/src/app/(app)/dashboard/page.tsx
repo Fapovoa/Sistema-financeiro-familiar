@@ -92,7 +92,7 @@ export default async function DashboardPage() {
     <>
       <Header title="Dashboard" />
       <div className="space-y-6 p-6">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 2xl:grid-cols-4">
           <StatCard icon={Banknote} label="Receitas do mês" value={brl(receitasMes)}
             badge={{ text: comprometimento !== null ? `${100 - Math.min(comprometimento, 100)}% livre` : "—", tone: "up" }}
             spark={evolucao.map((m) => m.receitas)} sparkKind="bars" />
