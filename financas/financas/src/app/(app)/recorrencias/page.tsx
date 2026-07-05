@@ -111,4 +111,137 @@ export default function RecorrenciasPage() {
     const json = await res.json().catch(() => ({}));
     setBusy(null);
     if (!res.ok) return setMsg({ ok: false, text: `ERRO: ${json.error ?? res.statusText}` });
-    setMsg({ ok: true, text: r.active ? "Recorrência inativada —
+    setMsg({ ok: true, text: r.active ? "Recorrência inativada — previsões futuras removidas do caixa." : `Recorrência reativada — ${json.forecasts} previsões recriadas.` });
+    load();
+  }
+
+  async function remove(r: Rule) {
+    if (!confirm(`Excluir a recorrência "${r.description}"? As previsões futuras serão removidas; o que já foi pago/confirmado fica no histórico.`)) return;
+    setBusy(r.id); setMsg(null);
+    const res = await fetch("/api/recurrences", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: r.id }),
+    });
+    const json = await res.json().catch(() => ({}));
+    setBusy(null);
+    if (!res.ok) return setMsg({ ok: false, text: `ERRO ao excluir: ${json.error ?? res.statusText}` });
+    setMsg({ ok: true, text: "Recorrência excluída." });
+    load();
+  }
+
+  const receitas = rules.filter((r) => r.kind === "income");
+  const despesas = rules.filter((r) => r.kind === "expense");
+  const totalAtivasDespesa = despesas.filter((r) => r.active).reduce((s, r) => s + Number(r.amount), 0);
+  const totalAtivasReceita = receitas.filter((r) => r.active).reduce((s, r) => s + Number(r.amount), 0);
+
+  return (
+    <>
+      <Header title="Recorrências" />
+      <div className="space-y-5 p-6">
+        {msg && (
+          <p className={clsx("rounded-xl px-4 py-3 text-sm", msg.ok ? "bg-success-bg text-success-fg" : "bg-danger-bg text-danger-fg")}>
+            {msg.text}
+          </p>
+        )}
+
+        <form onSubmit={save} className="card grid grid-cols-1 gap-4 p-5 md:grid-cols-3 xl:grid-cols-6">
+          <label className="text-sm"><span className="mb-1 block font-medium">Tipo</span>
+            <select className="input" value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value as "expense" | "income", category_id: "" })}>
+              <option value="expense">Despesa</option>
+              <option value="income">Receita</option>
+            </select></label>
+          <label className="text-sm xl:col-span-2"><span className="mb-1 block font-medium">Descrição</span>
+            <input className="input" placeholder="Aluguel, salário, mensalidade…" value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })} required /></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">Valor (R$)</span>
+            <input className="input" inputMode="decimal" placeholder="0,00" value={form.amount}
+              onChange={(e) => setForm({ ...form, amount: e.target.value })} required /></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">Dia do mês</span>
+            <input className="input" type="number" min={1} max={31} value={form.day_of_month}
+              onChange={(e) => setForm({ ...form, day_of_month: e.target.value })} required /></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">Categoria</span>
+            <select className="input" value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}>
+              <option value="">—</option>
+              {cats.filter((c) => c.type === form.kind).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">Conta</span>
+            <select className="input" value={form.account_id} onChange={(e) => setForm({ ...form, account_id: e.target.value })}>
+              <option value="">—</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">Início</span>
+            <input type="date" className="input" value={form.start_date}
+              onChange={(e) => setForm({ ...form, start_date: e.target.value })} required /></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">Fim (opcional)</span>
+            <input type="date" className="input" value={form.end_date}
+              onChange={(e) => setForm({ ...form, end_date: e.target.value })} />
+            <span className="text-[11px] text-ink-500">Em branco = sem data de fim</span></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">Projetar (meses)</span>
+            <input className="input" type="number" min={1} max={24} value={form.months_ahead}
+              onChange={(e) => setForm({ ...form, months_ahead: e.target.value })} /></label>
+          <div className="flex items-end gap-2 md:col-span-3 xl:col-span-3">
+            <button className="btn-primary" disabled={saving}>
+              <Plus size={16} /> {saving ? "Gravando…" : editing ? "Salvar alterações" : "Adicionar recorrência"}
+            </button>
+            {editing && (
+              <button type="button" className="btn-ghost" onClick={() => { setEditing(null); setForm({ ...EMPTY }); }}>
+                <X size={15} /> Cancelar edição
+              </button>
+            )}
+          </div>
+        </form>
+
+        <p className="text-sm text-ink-500">
+          Ativas: <b className="text-success-fg">{brl(totalAtivasReceita)}</b> em receitas/mês ·{" "}
+          <b className="text-danger-fg">{brl(totalAtivasDespesa)}</b> em despesas/mês.
+          As previsões aparecem no Fluxo de caixa como “previsto” até a data projetada.
+        </p>
+
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+          {[{ titulo: "Despesas recorrentes", list: despesas, tone: "danger" }, { titulo: "Receitas recorrentes", list: receitas, tone: "success" }].map((col) => (
+            <div key={col.titulo} className="card p-5">
+              <h2 className="mb-3 font-bold">{col.titulo} <span className="text-sm font-normal text-ink-500">({col.list.length})</span></h2>
+              <ul className="space-y-2">
+                {col.list.map((r) => (
+                  <li key={r.id} className={clsx("rounded-xl border px-4 py-3", r.active ? "border-slate-100" : "border-slate-100 bg-slate-50 opacity-70", editing === r.id && "ring-2 ring-brand-500")}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="min-w-0 flex-1 truncate font-semibold">{r.description}</p>
+                      <span className={clsx("font-bold", col.tone === "danger" ? "text-danger-fg" : "text-success-fg")}>{brl(Number(r.amount))}</span>
+                      <span className={clsx("rounded-md px-2 py-0.5 text-xs font-semibold", r.active ? "bg-success-bg text-success-fg" : "bg-slate-200 text-ink-500")}>
+                        {r.active ? "ativa" : "inativa"}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-ink-500">
+                      todo dia {r.day_of_month} · desde {brDate(r.start_date)}
+                      {r.end_date ? ` até ${brDate(r.end_date)}` : " · sem data de fim"}
+                      {r.categories?.name && ` · ${r.categories.name}`}
+                      {r.accounts?.name && ` · ${r.accounts.name}`}
+                      {` · projeta ${r.months_ahead} meses`}
+                    </p>
+                    <div className="mt-2 flex gap-1.5">
+                      <button onClick={() => toggleActive(r)} disabled={busy === r.id}
+                        className="btn-ghost !px-3 !py-1 text-xs" title={r.active ? "Inativar (remove previsões futuras)" : "Reativar (recria previsões)"}>
+                        {r.active ? <><Pause size={13} /> Inativar</> : <><Play size={13} /> Reativar</>}
+                      </button>
+                      <button onClick={() => startEdit(r)} disabled={busy === r.id} className="btn-ghost !px-3 !py-1 text-xs"><Pencil size={13} /> Editar</button>
+                      <button onClick={() => remove(r)} disabled={busy === r.id}
+                        className="btn-ghost !px-3 !py-1 text-xs text-danger-fg"><Trash2 size={13} /> Excluir</button>
+                    </div>
+                  </li>
+                ))}
+                {col.list.length === 0 && <p className="py-6 text-center text-sm text-ink-500">Nenhuma recorrência cadastrada.</p>}
+              </ul>
+            </div>
+          ))}
+        </div>
+
+        <p className="text-xs text-ink-500">
+          Nota: recorrências criadas antes desta página (pelo checkbox “Recorrente” de Receitas/Despesas) continuam no banco,
+          mas não aparecem nesta lista — para gerenciá-las por aqui, cadastre-as de novo nesta tela e apague as previsões antigas na página de origem.
+        </p>
+      </div>
+    </>
+  );
+}
