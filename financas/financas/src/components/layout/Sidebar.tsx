@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
   LayoutGrid, ArrowLeftRight, CreditCard, Upload, TrendingUp,
-  Wallet, CalendarRange, ShieldAlert, Landmark, Tags, Sparkles,
+  Wallet, CalendarRange, ShieldAlert, Landmark, Tags, Sparkles, Repeat,
 } from "lucide-react";
 
 const NAV = [
@@ -13,6 +13,7 @@ const NAV = [
   { href: "/despesas", label: "Despesas", icon: ArrowLeftRight },
   { href: "/cartoes", label: "Cartões", icon: CreditCard },
   { href: "/receitas", label: "Receitas", icon: TrendingUp },
+  { href: "/recorrencias", label: "Recorrências", icon: Repeat },
   { href: "/fluxo-caixa", label: "Fluxo de caixa", icon: CalendarRange },
   { href: "/auditoria", label: "Auditoria", icon: ShieldAlert },
   { href: "/contas", label: "Contas & cartões", icon: Landmark },
