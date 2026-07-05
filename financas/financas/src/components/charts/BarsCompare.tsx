@@ -13,8 +13,8 @@ export function BarsCompare({ data }: { data: { label: string; receitas: number;
             tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : String(v))} />
           <Tooltip formatter={(v: number) => brl(v)} />
           <Legend iconType="circle" />
-          <Bar dataKey="receitas" name="Receitas" fill="#22C55E" radius={[6, 6, 0, 0]} />
-          <Bar dataKey="despesas" name="Despesas" fill="#4A6CF7" radius={[6, 6, 0, 0]} />
+          <Bar dataKey="receitas" name="Receitas" fill="#BFFF00" radius={[6, 6, 0, 0]} />
+          <Bar dataKey="despesas" name="Despesas" fill="#F74AF2" radius={[6, 6, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
     </div>
