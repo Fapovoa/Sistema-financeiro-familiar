@@ -46,7 +46,11 @@ function resolvePeriodo(periodo: string, de: string, ate: string): { startISO: s
   return { startISO: format(start, "yyyy-MM-dd"), endISO: format(end, "yyyy-MM-dd") };
 }
 
-/** Receitas: cadastro manual (à vista ou parcelado), edição, marcação de status e busca. */
+/**
+ * Receitas: cadastro manual (à vista, parcelado ou recorrente), edição,
+ * marcação de status e busca. Recorrências criadas aqui vão para a MESMA
+ * tabela da página Recorrências (gerenciáveis lá: inativar, editar, excluir).
+ */
 export default function ReceitasPage() {
   const supabase = createClient();
   const [rows, setRows] = useState<any[]>([]);
@@ -71,8 +75,9 @@ export default function ReceitasPage() {
   const [form, setForm] = useState({
     date: new Date().toISOString().slice(0, 10),
     description: "", amount: "", category_id: "", account_id: "",
-    recurring: false, frequency: "monthly", status: "paid", notes: "",
+    recurring: false, status: "paid", notes: "",
     payType: "avista", installments: "2",
+    recDay: String(new Date().getDate()), recEnd: "", recMonths: "12",
   });
 
   async function load(p = periodo, d = de, a = ate) {
@@ -109,10 +114,43 @@ export default function ReceitasPage() {
   const nParcelas = parseInt(form.installments, 10) || 0;
   const totalParcelado = valorNum * nParcelas;
 
+  const parcelado = form.payType === "parcelado";
+  const recorrente = form.recurring && !parcelado;
+  const recTemFim = !!form.recEnd;
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true); setMsg(null);
-    const parcelado = form.payType === "parcelado";
+
+    // RECORRENTE: grava na tabela de recorrências (mesma da página Recorrências)
+    if (recorrente) {
+      const res = await fetch("/api/recurrences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "income",
+          description: form.description,
+          amount: parseFloat(form.amount.replace(/\./g, "").replace(",", ".")),
+          category_id: form.category_id || null,
+          account_id: form.account_id || null,
+          day_of_month: parseInt(form.recDay, 10) || new Date(form.date + "T12:00:00").getDate(),
+          start_date: form.date,
+          end_date: form.recEnd || null,
+          months_ahead: parseInt(form.recMonths, 10) || 3,
+          active: true,
+          notes: form.notes || null,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      setSaving(false);
+      if (!res.ok) return setMsg({ ok: false, text: `ERRO ao gravar: ${json.error ?? res.statusText}` });
+      setMsg({ ok: true, text: `Recorrência criada — ${json.forecasts} previsões lançadas. Gerencie (inativar/editar) na página Recorrências. Marque cada uma com ✓ quando receber.` });
+      setForm((f) => ({ ...f, description: "", amount: "", notes: "", recurring: false }));
+      load();
+      return;
+    }
+
+    // À VISTA ou PARCELADO: rota de lançamentos manuais
     const res = await fetch("/api/transactions/manual", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -124,7 +162,7 @@ export default function ReceitasPage() {
         category_id: form.category_id || null,
         account_id: form.account_id || null,
         status: form.status,
-        recurring: parcelado ? false : (form.recurring && form.frequency === "monthly"),
+        recurring: false,
         notes: form.notes || null,
         installments: parcelado ? parseInt(form.installments, 10) || 2 : null,
       }),
@@ -136,7 +174,7 @@ export default function ReceitasPage() {
       ok: true,
       text: json.installments
         ? `Receita parcelada em ${json.installments}× — a 1ª registrada e ${json.installments - 1} previstas nos meses seguintes.`
-        : json.projected ? `Receita gravada + ${json.projected} meses previstos.` : "Receita gravada no banco.",
+        : "Receita gravada no banco.",
     });
     setForm((f) => ({ ...f, description: "", amount: "", notes: "" }));
     load();
@@ -199,8 +237,6 @@ export default function ReceitasPage() {
     load();
   }
 
-  const parcelado = form.payType === "parcelado";
-
   return (
     <>
       <Header title="Receitas" />
@@ -209,20 +245,26 @@ export default function ReceitasPage() {
           <p className={`rounded-xl px-4 py-3 text-sm ${msg.ok ? "bg-success-bg text-success-fg" : "bg-danger-bg text-danger-fg"}`}>{msg.text}</p>
         )}
         <form onSubmit={add} className="card grid grid-cols-1 gap-4 p-5 md:grid-cols-4 xl:grid-cols-8">
-          <label className="text-sm"><span className="mb-1 block font-medium">Data</span>
-            <input type="date" className="input" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required /></label>
+          <label className="text-sm"><span className="mb-1 block font-medium">{recorrente ? "Início" : "Data"}</span>
+            <input type="date" className="input" value={form.date}
+              onChange={(e) => {
+                const v = e.target.value;
+                setForm((f) => ({ ...f, date: v, recDay: /^\d{4}-\d{2}-\d{2}$/.test(v) ? String(new Date(v + "T12:00:00").getDate()) : f.recDay }));
+              }} required /></label>
           <label className="text-sm xl:col-span-2"><span className="mb-1 block font-medium">Descrição</span>
             <input className="input" placeholder="Salário, venda, aluguel recebido…" value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })} required /></label>
-          <label className="text-sm"><span className="mb-1 block font-medium">Forma de recebimento</span>
-            <select className="input" value={form.payType} onChange={(e) => setForm({ ...form, payType: e.target.value })}>
+          <label className={clsx("text-sm", recorrente && "opacity-40")}><span className="mb-1 block font-medium">Forma de recebimento</span>
+            <select className="input" value={form.payType} disabled={recorrente}
+              onChange={(e) => setForm({ ...form, payType: e.target.value, recurring: e.target.value === "parcelado" ? false : form.recurring })}>
               <option value="avista">À vista</option>
               <option value="parcelado">Parcelado</option>
             </select></label>
           <label className="text-sm"><span className="mb-1 block font-medium">Valor (R$)</span>
             <input className="input" inputMode="decimal" placeholder="0,00" value={form.amount}
               onChange={(e) => setForm({ ...form, amount: e.target.value })} required />
-            {parcelado && <span className="text-[11px] text-ink-500">valor de cada parcela</span>}</label>
+            {parcelado && <span className="text-[11px] text-ink-500">valor de cada parcela</span>}
+            {recorrente && <span className="text-[11px] text-ink-500">valor de cada mês</span>}</label>
           {parcelado && (
             <label className="text-sm"><span className="mb-1 block font-medium">Nº de parcelas</span>
               <input className="input" type="number" min={2} max={60} value={form.installments}
@@ -234,25 +276,53 @@ export default function ReceitasPage() {
           <label className="text-sm"><span className="mb-1 block font-medium">Conta</span>
             <select className="input" value={form.account_id} onChange={(e) => setForm({ ...form, account_id: e.target.value })}>
               <option value="">—</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
-          <label className="text-sm"><span className="mb-1 block font-medium">Status {parcelado && "(1ª parcela)"}</span>
-            <select className="input" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
-              {STATUS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}</select></label>
+          <label className={clsx("text-sm", recorrente && "opacity-40")}><span className="mb-1 block font-medium">Status {parcelado && "(1ª parcela)"}</span>
+            <select className="input" value={form.status} disabled={recorrente}
+              onChange={(e) => setForm({ ...form, status: e.target.value })}>
+              {STATUS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}</select>
+            {recorrente && <span className="text-[11px] text-ink-500">recorrências entram como “previstas”</span>}</label>
           <div className="flex items-end gap-3">
             <label className={clsx("flex items-center gap-2 pb-2.5 text-sm", parcelado && "opacity-40")}>
-              <input type="checkbox" checked={parcelado ? false : form.recurring} disabled={parcelado}
+              <input type="checkbox" checked={recorrente} disabled={parcelado}
                 onChange={(e) => setForm({ ...form, recurring: e.target.checked })} />
               Recorrente (mensal)
             </label>
           </div>
+
+          {recorrente && (
+            <>
+              <label className="text-sm"><span className="mb-1 block font-medium">Dia do mês</span>
+                <input className="input" type="number" min={1} max={31} value={form.recDay}
+                  onChange={(e) => setForm({ ...form, recDay: e.target.value })} /></label>
+              <label className="text-sm"><span className="mb-1 block font-medium">Fim (opcional)</span>
+                <input type="date" className="input" value={form.recEnd}
+                  onChange={(e) => setForm({ ...form, recEnd: e.target.value })} />
+                <span className="text-[11px] text-ink-500">Em branco = sem data de fim</span></label>
+              <label className="text-sm"><span className="mb-1 block font-medium">Projetar (meses)</span>
+                <input className={clsx("input", recTemFim && "opacity-50")} type="number" min={1} max={24}
+                  value={form.recMonths} disabled={recTemFim}
+                  onChange={(e) => setForm({ ...form, recMonths: e.target.value })} />
+                <span className="text-[11px] text-ink-500">
+                  {recTemFim ? "Com fim definido, projeta até a data de fim" : "Sem fim: projeta N meses à frente"}
+                </span></label>
+            </>
+          )}
+
           <div className="flex flex-wrap items-end gap-3 md:col-span-4 xl:col-span-8">
-            <button className="btn-primary" disabled={saving}><Plus size={16} /> {saving ? "Salvando…" : "Adicionar receita"}</button>
-            {parcelado ? (
+            <button className="btn-primary" disabled={saving}><Plus size={16} /> {saving ? "Salvando…" : recorrente ? "Criar recorrência" : "Adicionar receita"}</button>
+            {parcelado && (
               <p className="text-xs text-ink-500">
                 {nParcelas || 0}× de <b>{brl(valorNum)}</b> = total <b>{brl(totalParcelado)}</b>.
                 A 1ª cai na data escolhida; as demais entram como <b>previstas</b> nos meses seguintes.
               </p>
-            ) : (
-              <p className="text-xs text-ink-500">Para salário e contas fixas de longo prazo, prefira a página Recorrências (projeta até 24 meses). O checkbox projeta só 3 meses.</p>
+            )}
+            {recorrente && (
+              <p className="text-xs text-ink-500">
+                Cria a recorrência (gerenciável na página <b>Recorrências</b>) e lança as previsões futuras no caixa.
+              </p>
+            )}
+            {!parcelado && !recorrente && (
+              <p className="text-xs text-ink-500">Marque “Recorrente (mensal)” para salário e contas fixas — os campos de período aparecem aqui mesmo.</p>
             )}
           </div>
         </form>
