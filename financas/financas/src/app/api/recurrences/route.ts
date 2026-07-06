@@ -21,20 +21,31 @@ type RulePayload = {
   notes: string | null;
 };
 
-/** Datas futuras que a recorrência deve gerar (de hoje até o horizonte). */
+/**
+ * Datas futuras que a recorrência deve gerar.
+ * Com data de FIM: projeta até ela (teto de segurança de 60 meses).
+ * Sem fim: projeta "months_ahead" meses à frente.
+ */
 function datesForRule(r: RulePayload, todayISO: string): string[] {
   const out: string[] = [];
   const today = new Date(todayISO + "T12:00:00");
   const startBase = new Date(r.start_date + "T12:00:00");
   const end = r.end_date ? new Date(r.end_date + "T12:00:00") : null;
-  const horizon = addMonths(today, Math.max(1, Math.min(24, r.months_ahead || 3)));
+
+  const tetoSeguranca = addMonths(today, 60);
+  let horizon: Date;
+  if (end) {
+    horizon = end <= tetoSeguranca ? end : tetoSeguranca;
+  } else {
+    horizon = addMonths(today, Math.max(1, Math.min(24, r.months_ahead || 3)));
+  }
 
   let cursor = startOfMonth(today < startBase ? startBase : today);
   while (cursor <= horizon) {
     const lastDay = endOfMonth(cursor).getDate();
     const day = Math.min(Math.max(1, r.day_of_month), lastDay); // dia 31 vira 28/29/30 quando o mês não tem
     const d = new Date(cursor.getFullYear(), cursor.getMonth(), day, 12);
-    if (d >= today && d >= startBase && (!end || d <= end)) out.push(format(d, "yyyy-MM-dd"));
+    if (d >= today && d >= startBase && d <= horizon && (!end || d <= end)) out.push(format(d, "yyyy-MM-dd"));
     cursor = addMonths(cursor, 1);
   }
   return out;
