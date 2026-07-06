@@ -51,7 +51,7 @@ export default function ImportarPage() {
     const res = await fetch("/api/import/parse", { method: "POST", body: fd });
     const json = await res.json();
     setLoading(false);
-    if (!res.ok) return setError(json.error ?? "Falha ao ler o PDF.");
+    if (!res.ok) return setError(json.error ?? "Falha ao ler o arquivo.");
     setPreview(json);
     setRows(json.transactions.map((t: PreviewTx) => ({ ...t, action: t.suggested_action })));
   }
@@ -60,7 +60,6 @@ export default function ImportarPage() {
     if (!preview || !file) return;
     setLoading(true); setError(null);
 
-    // 1. sobe o PDF para o Storage (pasta da família)
     let filePath: string | null = null;
     {
       const path = `${FAMILY_USER_ID}/${Date.now()}-${file.name}`;
@@ -68,7 +67,6 @@ export default function ImportarPage() {
       if (!upErr) filePath = path;
     }
 
-    // 2. confirma a importação
     const res = await fetch("/api/import/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -117,13 +115,13 @@ export default function ImportarPage() {
             <input type="month" className="input" value={refMonth} onChange={(e) => setRefMonth(e.target.value)} />
           </label>
           <label className="text-sm md:col-span-1">
-            <span className="mb-1 block font-medium">Arquivo PDF</span>
-            <input type="file" accept="application/pdf" className="input"
+            <span className="mb-1 block font-medium">Arquivo (PDF ou Excel)</span>
+            <input type="file" accept=".pdf,.xlsx,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="input"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </label>
           <div className="flex items-end">
             <button className="btn-primary w-full justify-center" disabled={loading}>
-              <FileUp size={16} /> {loading ? "Lendo…" : "Ler PDF"}
+              <FileUp size={16} /> {loading ? "Lendo…" : "Ler arquivo"}
             </button>
           </div>
         </form>
@@ -163,7 +161,7 @@ export default function ImportarPage() {
                 )}
                 {preview.already_imported && (
                   <p className="mt-1 flex items-center gap-1 text-sm text-warn-fg">
-                    <Copy size={14} /> Este PDF já foi importado antes ({preview.already_imported.file_name}).
+                    <Copy size={14} /> Este arquivo já foi importado antes ({preview.already_imported.file_name}).
                   </p>
                 )}
                 {preview.warnings?.map((w: string, i: number) => (
