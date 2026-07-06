@@ -42,7 +42,9 @@ export default async function DashboardPage() {
     .reduce((s, t) => s + Math.abs(t.amount), 0);
   const resultado = receitasMes - despesasMesCaixa;
 
-  const previstas = all.filter((t) => t.status === "forecast" && t.transaction_date >= todayISO)
+  // Despesas futuras provisionadas: SÓ valores negativos (despesas).
+  // Receitas previstas (parcelas/recorrências a receber) NÃO entram aqui.
+  const previstas = all.filter((t) => t.amount < 0 && t.status === "forecast" && t.transaction_date >= todayISO)
     .reduce((s, t) => s + Math.abs(t.amount), 0);
   const faturas30 = (invoices ?? []).reduce((s, i) => s + Number(i.total_amount), 0);
 
