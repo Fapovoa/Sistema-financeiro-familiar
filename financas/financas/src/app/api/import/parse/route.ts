@@ -6,21 +6,20 @@ const pdf = require("pdf-parse/lib/pdf-parse.js");
 import { createClient } from "@/lib/supabase/server";
 import { FAMILY_USER_ID } from "@/lib/user";
 import { parsePdfText } from "@/lib/parsers";
+import { parseItauFaturaXlsx } from "@/lib/parsers/itau-fatura-xlsx";
 import { evaluateDuplicate, ExistingTx } from "@/lib/engine/dedupe";
 import { suggestCategory } from "@/lib/engine/categorize";
+import { normalizeDescription } from "@/lib/parsers/normalize";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
  * POST /api/import/parse
- * FormData: file (PDF), document_type, account_id, reference_month
- * 1. valida usuário
- * 2. calcula hash do arquivo (bloqueia reimportação do mesmo PDF)
- * 3. extrai texto, roda o parser da instituição
- * 4. aplica regras de categorização do usuário
- * 5. marca duplicidades/reconciliações contra o banco
- * 6. devolve a prévia (nada é gravado aqui)
+ * FormData: file (PDF ou XLSX), document_type, account_id, reference_month
+ * PDF  -> pdf-parse + parsePdfText (detecção por instituição)
+ * XLSX -> parseItauFaturaXlsx (fatura do Itaú exportada do app)
+ * Nada é gravado aqui: devolve a prévia.
  */
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
@@ -30,7 +29,7 @@ export async function POST(req: NextRequest) {
   const file = form.get("file") as File | null;
   const documentType = String(form.get("document_type") ?? "");
   const accountId = String(form.get("account_id") ?? "");
-  if (!file) return NextResponse.json({ error: "Envie um arquivo PDF." }, { status: 400 });
+  if (!file) return NextResponse.json({ error: "Envie um arquivo PDF ou XLSX." }, { status: 400 });
 
   const buf = Buffer.from(await file.arrayBuffer());
   const fileHash = createHash("sha256").update(buf).digest("hex");
@@ -41,27 +40,43 @@ export async function POST(req: NextRequest) {
     .eq("file_hash", fileHash)
     .maybeSingle();
 
-  let text = "";
-  try {
-    const parsed = await pdf(buf);
-    text = parsed.text ?? "";
-  } catch {
-    return NextResponse.json({ error: "Não foi possível ler o PDF." }, { status: 422 });
-  }
+  // Detecta o tipo de arquivo: XLSX (Excel) ou PDF
+  const isXlsx = /\.xlsx$/i.test(file.name)
+    || file.type.includes("spreadsheetml")
+    || file.type.includes("excel");
 
-  const result = parsePdfText(text);
+  let result;
+  if (isXlsx) {
+    try {
+      result = parseItauFaturaXlsx(buf);
+    } catch {
+      return NextResponse.json({ error: "Não foi possível ler o arquivo XLSX." }, { status: 422 });
+    }
+  } else {
+    let text = "";
+    try {
+      const parsed = await pdf(buf);
+      text = parsed.text ?? "";
+    } catch {
+      return NextResponse.json({ error: "Não foi possível ler o PDF." }, { status: 422 });
+    }
+    result = parsePdfText(text);
+  }
 
   // Regras de categorização aprendidas do usuário (camada 1)
   const { data: rules } = await supabase
     .from("categorization_rules")
     .select("normalized_pattern, category_id, confidence");
 
+  const { data: renames } = await supabase
+    .from("rename_rules")
+    .select("normalized_pattern, new_name");
+
   const { data: categories } = await supabase
     .from("categories")
     .select("id, name, type");
   const catByName = new Map((categories ?? []).map((c) => [c.name.toLowerCase() + ":" + c.type, c.id]));
 
-  // Lançamentos existentes na janela de datas do documento (para dedupe)
   const dates = result.transactions.map((t) => t.transaction_date).sort();
   let existing: ExistingTx[] = [];
   if (dates.length) {
@@ -74,7 +89,15 @@ export async function POST(req: NextRequest) {
   }
 
   const preview = result.transactions.map((t) => {
-    // camada 1: regra do usuário sobrepõe sugestão por keyword
+    let description_clean = t.description_clean;
+    const norm = normalizeDescription(t.description_original);
+    for (const r of renames ?? []) {
+      if (!r.normalized_pattern) continue;
+      if (norm.includes(r.normalized_pattern) || r.normalized_pattern.includes(norm)) {
+        description_clean = r.new_name;
+        break;
+      }
+    }
     const ruled = suggestCategory(t.description_original, (rules ?? []) as never);
     let category_id: string | null = null;
     let category_name = t.category_suggestion;
@@ -99,7 +122,7 @@ export async function POST(req: NextRequest) {
       : confidence < 0.5 && t.type === "expense" ? "audit"
       : t.suggested_action;
 
-    return { ...t, category_id, category_suggestion: category_name, confidence_score: confidence, deduplication_status, duplicate_match_id: dup.matchId, suggested_action };
+    return { ...t, description_clean, category_id, category_suggestion: category_name, confidence_score: confidence, deduplication_status, duplicate_match_id: dup.matchId, suggested_action };
   });
 
   return NextResponse.json({
