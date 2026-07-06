@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { FAMILY_USER_ID } from "@/lib/user";
 import { projectRecurrences } from "@/lib/engine/recurrence";
+import { addMonths, format } from "date-fns";
 
 export const runtime = "nodejs";
 
 /**
  * Lançamentos manuais (despesas e receitas) gravados PELO SERVIDOR.
- * POST cria (com projeção de 3 meses se recorrente); PATCH edita; DELETE remove.
+ * POST cria: à vista (com projeção de 3 meses se recorrente) OU parcelado
+ * (N lançamentos, 1 por mês — a 1ª com o status escolhido, as demais previstas).
+ * PATCH edita; DELETE remove.
  */
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
@@ -15,17 +18,21 @@ export async function POST(req: NextRequest) {
     kind: "expense" | "income";
     date: string;
     description: string;
-    amount: number;              // sempre positivo; o sinal é definido pelo kind
+    amount: number;              // à vista = valor total; parcelado = valor de CADA parcela
     category_id: string | null;
     account_id: string | null;
     status: "paid" | "forecast" | "pending";
     recurring: boolean;
     notes: string | null;
+    installments?: number | null; // vazio/1 = à vista; >=2 = parcelado
   };
 
   const value = Math.abs(Number(b.amount));
   if (!b.description?.trim() || !Number.isFinite(value) || value === 0 || !b.date) {
     return NextResponse.json({ error: "Preencha descrição, valor e data." }, { status: 400 });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(b.date)) {
+    return NextResponse.json({ error: "Data inválida." }, { status: 400 });
   }
   const signed = b.kind === "expense" ? -value : value;
 
@@ -39,11 +46,40 @@ export async function POST(req: NextRequest) {
     source: "manual",
     is_recurring: b.recurring,
     is_card_purchase: false,
-    affects_cash_flow: true,          // manual = à vista: impacta o caixa (Caju incluso)
+    affects_cash_flow: true,          // manual = à vista/parcela recebida: impacta o caixa
     affects_category_report: true,
     notes: b.notes || null,
   };
 
+  // -------- PARCELADO --------
+  const n = b.installments && Number(b.installments) >= 2 ? Math.floor(Number(b.installments)) : 1;
+  if (n >= 2) {
+    if (n > 60) return NextResponse.json({ error: "Número de parcelas muito alto (máximo 60)." }, { status: 400 });
+    const primeira = new Date(b.date + "T12:00:00");
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      const d = i === 0 ? b.date : format(addMonths(primeira, i), "yyyy-MM-dd");
+      const isPrimeira = i === 0;
+      rows.push({
+        ...base,
+        amount: signed,
+        transaction_date: d,
+        // 1ª parcela com o status escolhido; futuras entram como "prevista"
+        status: isPrimeira ? b.status : "forecast",
+        source: isPrimeira ? "manual" : "installment_forecast",
+        is_recurring: false,
+        is_installment: true,
+        installment_number: i + 1,
+        installment_total: n,
+        description_original: `${b.description.trim()} (parcela ${i + 1}/${n})`,
+      });
+    }
+    const { error } = await supabase.from("transactions").insert(rows);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true, installments: n });
+  }
+
+  // -------- À VISTA (comportamento atual) --------
   const { error: insErr } = await supabase.from("transactions").insert({
     ...base, amount: signed, transaction_date: b.date, status: b.status,
   });
