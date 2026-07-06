@@ -5,7 +5,9 @@ export const runtime = "nodejs";
 
 /**
  * Login por palavra-chave (a mesma cadastrada na página Perfil).
- * Valida PELO SERVIDOR e grava um cookie de acesso (o "crachá").
+ * Valida PELO SERVIDOR e grava um cookie de SESSÃO (o "crachá"):
+ * o navegador apaga esse cookie ao ser fechado, então o login é
+ * pedido novamente numa nova sessão do navegador.
  * Proteção leve para uso familiar — não substitui autenticação completa.
  */
 export async function POST(req: NextRequest) {
@@ -28,12 +30,12 @@ export async function POST(req: NextRequest) {
   }
 
   const res = NextResponse.json({ ok: true, warning: cadastrada ? null : "Nenhuma palavra-chave cadastrada — defina uma na página Perfil." });
+  // Cookie de SESSÃO: sem maxAge/expires, o navegador o apaga ao fechar.
   res.cookies.set("fp_auth", "ok", {
     httpOnly: true,
     sameSite: "lax",
     secure: true,
     path: "/",
-    maxAge: 60 * 60 * 24 * 180, // 180 dias sem pedir de novo neste navegador
   });
   return res;
 }
