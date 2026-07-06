@@ -26,6 +26,7 @@ const EMPTY = {
  * Recorrências: contas fixas (receitas e despesas) com período de vigência.
  * As previsões futuras são geradas pelo servidor (status=previsto) e aparecem
  * no Fluxo de caixa. Inativar apaga as previsões futuras; reativar recria.
+ * Com data de FIM preenchida, projeta até ela (o campo "Projetar" desabilita).
  */
 export default function RecorrenciasPage() {
   const supabase = createClient();
@@ -135,6 +136,8 @@ export default function RecorrenciasPage() {
   const totalAtivasDespesa = despesas.filter((r) => r.active).reduce((s, r) => s + Number(r.amount), 0);
   const totalAtivasReceita = receitas.filter((r) => r.active).reduce((s, r) => s + Number(r.amount), 0);
 
+  const temFim = !!form.end_date;
+
   return (
     <>
       <Header title="Recorrências" />
@@ -179,8 +182,12 @@ export default function RecorrenciasPage() {
               onChange={(e) => setForm({ ...form, end_date: e.target.value })} />
             <span className="text-[11px] text-ink-500">Em branco = sem data de fim</span></label>
           <label className="text-sm"><span className="mb-1 block font-medium">Projetar (meses)</span>
-            <input className="input" type="number" min={1} max={24} value={form.months_ahead}
-              onChange={(e) => setForm({ ...form, months_ahead: e.target.value })} /></label>
+            <input className={clsx("input", temFim && "opacity-50")} type="number" min={1} max={24}
+              value={form.months_ahead} disabled={temFim}
+              onChange={(e) => setForm({ ...form, months_ahead: e.target.value })} />
+            <span className="text-[11px] text-ink-500">
+              {temFim ? "Com fim definido, projeta até a data de fim" : "Sem fim: projeta N meses à frente"}
+            </span></label>
           <div className="flex items-end gap-2 md:col-span-3 xl:col-span-3">
             <button className="btn-primary" disabled={saving}>
               <Plus size={16} /> {saving ? "Gravando…" : editing ? "Salvar alterações" : "Adicionar recorrência"}
@@ -218,7 +225,7 @@ export default function RecorrenciasPage() {
                       {r.end_date ? ` até ${brDate(r.end_date)}` : " · sem data de fim"}
                       {r.categories?.name && ` · ${r.categories.name}`}
                       {r.accounts?.name && ` · ${r.accounts.name}`}
-                      {` · projeta ${r.months_ahead} meses`}
+                      {!r.end_date && ` · projeta ${r.months_ahead} meses`}
                     </p>
                     <div className="mt-2 flex gap-1.5">
                       <button onClick={() => toggleActive(r)} disabled={busy === r.id}
@@ -238,8 +245,7 @@ export default function RecorrenciasPage() {
         </div>
 
         <p className="text-xs text-ink-500">
-          Nota: recorrências criadas antes desta página (pelo checkbox “Recorrente” de Receitas/Despesas) continuam no banco,
-          mas não aparecem nesta lista — para gerenciá-las por aqui, cadastre-as de novo nesta tela e apague as previsões antigas na página de origem.
+          As recorrências criadas pelo checkbox “Recorrente” da página Receitas também aparecem nesta lista — as duas telas gravam no mesmo lugar.
         </p>
       </div>
     </>
