@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
   LayoutGrid, ArrowLeftRight, CreditCard, Upload, TrendingUp,
-  Wallet, CalendarRange, ShieldAlert, Landmark, Tags, Repeat, Target,
+  Wallet, CalendarRange, ShieldAlert, Landmark, Tags, Repeat, Target, User,
 } from "lucide-react";
 
 const NAV = [
@@ -19,6 +19,7 @@ const NAV = [
   { href: "/auditoria", label: "Auditoria", icon: ShieldAlert },
   { href: "/contas", label: "Contas & cartões", icon: Landmark },
   { href: "/categorias", label: "Categorias", icon: Tags },
+  { href: "/perfil", label: "Perfil", icon: User },
 ];
 
 export function Sidebar({ auditCount = 0 }: { auditCount?: number }) {
