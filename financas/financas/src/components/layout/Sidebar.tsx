@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
   LayoutGrid, ArrowLeftRight, CreditCard, Upload, TrendingUp,
-  Wallet, CalendarRange, ShieldAlert, Landmark, Tags, Sparkles, Repeat,
+  Wallet, CalendarRange, ShieldAlert, Landmark, Tags, Repeat, Target,
 } from "lucide-react";
 
 const NAV = [
@@ -15,6 +15,7 @@ const NAV = [
   { href: "/receitas", label: "Receitas", icon: TrendingUp },
   { href: "/recorrencias", label: "Recorrências", icon: Repeat },
   { href: "/fluxo-caixa", label: "Fluxo de caixa", icon: CalendarRange },
+  { href: "/orcamento", label: "Orçamento", icon: Target },
   { href: "/auditoria", label: "Auditoria", icon: ShieldAlert },
   { href: "/contas", label: "Contas & cartões", icon: Landmark },
   { href: "/categorias", label: "Categorias", icon: Tags },
@@ -27,11 +28,6 @@ export function Sidebar({ auditCount = 0 }: { auditCount?: number }) {
       <Link href="/dashboard" className="mb-6 flex items-center gap-2 px-2">
         <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-500 text-white"><Wallet size={18} /></span>
         <span className="text-lg font-bold tracking-tight">Finanças</span>
-      </Link>
-
-      <Link href="/importar"
-        className="mb-4 rounded-full border border-brand-100 px-4 py-2 text-sm font-medium text-brand-600 transition hover:bg-brand-50">
-        <span className="inline-flex items-center gap-2"><Sparkles size={14} /> Importação inteligente</span>
       </Link>
 
       <nav className="flex-1 space-y-1">
