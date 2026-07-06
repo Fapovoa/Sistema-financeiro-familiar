@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Header } from "@/components/layout/Header";
 import { createClient } from "@/lib/supabase/client";
 import { brl, brDate } from "@/lib/format";
-import { Plus, Trash2, Pencil, Check, X } from "lucide-react";
+import { Plus, Trash2, Pencil, Check, X, Search } from "lucide-react";
 import clsx from "clsx";
 import {
   startOfMonth, endOfMonth, startOfYear, endOfYear, subMonths, format,
@@ -46,7 +46,7 @@ function resolvePeriodo(periodo: string, de: string, ate: string): { startISO: s
   return { startISO: format(start, "yyyy-MM-dd"), endISO: format(end, "yyyy-MM-dd") };
 }
 
-/** Receitas: cadastro manual (à vista ou parcelado), edição e marcação de status. */
+/** Receitas: cadastro manual (à vista ou parcelado), edição, marcação de status e busca. */
 export default function ReceitasPage() {
   const supabase = createClient();
   const [rows, setRows] = useState<any[]>([]);
@@ -56,10 +56,11 @@ export default function ReceitasPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  // Filtro de período
+  // Filtro de período + busca
   const [periodo, setPeriodo] = useState<string>("mes");
   const [de, setDe] = useState("");
   const [ate, setAte] = useState("");
+  const [q, setQ] = useState("");
 
   // Edição de linha
   const [editing, setEditing] = useState<string | null>(null);
@@ -97,7 +98,11 @@ export default function ReceitasPage() {
     if (v !== "personalizado") load(v, de, ate);
   }
 
-  const totalPeriodo = rows.reduce((s, r) => s + Number(r.amount), 0);
+  // Busca: filtra a lista carregada, na hora, pela descrição (sem diferenciar maiúsculas)
+  const visiveis = rows.filter((r) =>
+    !q.trim() || (r.description_clean ?? "").toLowerCase().includes(q.trim().toLowerCase())
+  );
+  const totalPeriodo = visiveis.reduce((s, r) => s + Number(r.amount), 0);
 
   // Prévia do parcelamento
   const valorNum = parseFloat((form.amount || "0").replace(/\./g, "").replace(",", ".")) || 0;
@@ -247,12 +252,12 @@ export default function ReceitasPage() {
                 A 1ª cai na data escolhida; as demais entram como <b>previstas</b> nos meses seguintes.
               </p>
             ) : (
-              <p className="text-xs text-ink-500">Receitas recorrentes são projetadas automaticamente para os próximos 3 meses como “previstas”.</p>
+              <p className="text-xs text-ink-500">Para salário e contas fixas de longo prazo, prefira a página Recorrências (projeta até 24 meses). O checkbox projeta só 3 meses.</p>
             )}
           </div>
         </form>
 
-        {/* Filtro de período */}
+        {/* Filtro de período + busca */}
         <div className="card flex flex-wrap items-end gap-3 p-4">
           <label className="text-sm">
             <span className="mb-1 block font-medium">Período</span>
@@ -269,8 +274,20 @@ export default function ReceitasPage() {
               <button type="button" className="btn-ghost" onClick={() => load("personalizado", de, ate)}>Aplicar</button>
             </>
           )}
+          <label className="text-sm">
+            <span className="mb-1 block font-medium">Buscar</span>
+            <span className="relative block">
+              <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-500" />
+              <input
+                className="w-56 rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                placeholder="Descrição…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+            </span>
+          </label>
           <p className="ml-auto text-sm text-ink-500">
-            Total do período: <b className="text-success-fg">{brl(totalPeriodo)}</b> · {rows.length} receitas
+            Total {q.trim() ? "da busca" : "do período"}: <b className="text-success-fg">{brl(totalPeriodo)}</b> · {visiveis.length} receitas
           </p>
         </div>
 
@@ -284,7 +301,7 @@ export default function ReceitasPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map((r) => {
+              {visiveis.map((r) => {
                 const st = STATUS.find((s) => s.v === r.status);
                 const isEditing = editing === r.id;
 
@@ -356,7 +373,7 @@ export default function ReceitasPage() {
                   </tr>
                 );
               })}
-              {rows.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-ink-500">Nenhuma receita no período.</td></tr>}
+              {visiveis.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-ink-500">Nenhuma receita no período.</td></tr>}
             </tbody>
           </table>
         </div>
