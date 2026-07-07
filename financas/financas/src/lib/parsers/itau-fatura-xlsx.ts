@@ -9,7 +9,7 @@ import { inflateRawSync } from "zlib";
  * descompacta nativamente (zlib.inflateRawSync). Muito mais confiável que o
  * PDF "grudado", pois as colunas já vêm separadas.
  *
- * Regras (validadas contra 7 faturas reais, soma batendo com o Itaú):
+ * Regras (validadas contra faturas reais, soma batendo com o Itaú):
  *  - "Pagamento Com Saldo" (pagamento da fatura anterior) é IGNORADO.
  *  - Compras (valor > 0) viram despesa (amount negativo).
  *  - Estornos/créditos (valor < 0) viram refund (amount positivo).
@@ -239,7 +239,9 @@ export function parseItauFaturaXlsx(buf: Buffer): ParseResult {
     });
   }
 
-  const totalFatura = subtotalPlanilha ?? Number(somaLancamentos.toFixed(2));
+  // Total da fatura = o que você paga/deve (cabeçalho). É o que impacta o caixa.
+  // Ex.: janeiro pagou 7.382,68 embora as compras novas somem 1.698,96 (resto = saldo/parcelas antigas).
+  const totalFatura = totalHeader ?? subtotalPlanilha ?? Number(somaLancamentos.toFixed(2));
 
   if (!dueISO) warnings.push("Não identifiquei a data de vencimento na planilha.");
   if (txs.length === 0) warnings.push("Nenhum lançamento reconhecido na fatura Itaú (xlsx). [parser xlsx v1]");
