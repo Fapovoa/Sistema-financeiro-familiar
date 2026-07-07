@@ -29,6 +29,20 @@ const REFUND_HINTS = /estorno|dev pix|devolucao|reembolso/;
 
 export type RuleRow = { normalized_pattern: string; category_id: string; confidence: number };
 
+/**
+ * "Assinatura compacta" de uma descrição já normalizada: mantém apenas as
+ * letras (remove números, espaços e pontuação) e tira o sufixo de país "bra".
+ * Assim, a MESMA loja é reconhecida mesmo quando entre uma fatura e outra:
+ *  - a cidade vem ora grudada ora separada  ("amorepaojuiz de forabra" x "amorepao juiz de fora bra")
+ *  - muda o número do estabelecimento         ("00111 sh independenci..." x "00112 sh independenci...")
+ * Não altera normalizeDescription (que é usada no hash de duplicidade).
+ */
+function compactSignature(normalized: string): string {
+  let s = normalized.replace(/[^a-z]/g, "");
+  if (s.endsWith("bra")) s = s.slice(0, -3);
+  return s;
+}
+
 export function classifyType(desc: string, amount: number): {
   type: "expense" | "income" | "transfer" | "credit_card_payment" | "refund";
   confidence: number;
@@ -44,7 +58,10 @@ export function classifyType(desc: string, amount: number): {
 
 /**
  * Categorização em camadas:
- * 1) regras salvas do usuário (match por inclusão/similaridade do padrão normalizado)
+ * 1) regras salvas do usuário — duas formas de casar:
+ *    a) inclusão do padrão normalizado (comportamento original)
+ *    b) inclusão da "assinatura compacta" (tolera número de estabelecimento
+ *       e cidade grudada/separada que variam entre faturas)
  * 2) palavras-chave conhecidas
  * 3) fallback: null (vai para auditoria se confiança < 0.5)
  */
@@ -53,13 +70,24 @@ export function suggestCategory(
   userRules: RuleRow[] = []
 ): { category: string | null; category_id: string | null; confidence: number } {
   const n = normalizeDescription(desc);
+  const nSig = compactSignature(n);
 
   for (const r of userRules) {
     if (!r.normalized_pattern) continue;
+
+    // (a) casamento original: inclusão do padrão normalizado
     if (n.includes(r.normalized_pattern) || r.normalized_pattern.includes(n)) {
       return { category: null, category_id: r.category_id, confidence: Math.max(0.9, r.confidence) };
     }
+
+    // (b) casamento por assinatura compacta (só letras, sem número/cidade grudada)
+    // Exige assinaturas de tamanho razoável (>= 6) para não casar por acaso.
+    const pSig = compactSignature(r.normalized_pattern);
+    if (pSig.length >= 6 && nSig.length >= 6 && (nSig.includes(pSig) || pSig.includes(nSig))) {
+      return { category: null, category_id: r.category_id, confidence: Math.max(0.9, r.confidence) };
+    }
   }
+
   for (const { kw, category, confidence } of KEYWORD_MAP) {
     if (kw.test(n)) return { category, category_id: null, confidence };
   }
