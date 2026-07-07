@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/server";
 import { FAMILY_USER_ID } from "@/lib/user";
 import { parsePdfText } from "@/lib/parsers";
 import { parseItauFaturaXlsx } from "@/lib/parsers/itau-fatura-xlsx";
+import { parseItauExtratoXls, isItauExtratoXls } from "@/lib/parsers/itau-extrato-xls";
 import { evaluateDuplicate, ExistingTx } from "@/lib/engine/dedupe";
 import { suggestCategory } from "@/lib/engine/categorize";
 import { normalizeDescription } from "@/lib/parsers/normalize";
@@ -16,9 +17,9 @@ export const maxDuration = 60;
 
 /**
  * POST /api/import/parse
- * FormData: file (PDF ou XLSX), document_type, account_id, reference_month
- * PDF  -> pdf-parse + parsePdfText (detecção por instituição)
- * XLSX -> parseItauFaturaXlsx (fatura do Itaú exportada do app)
+ * FormData: file (PDF ou Excel), document_type, account_id, reference_month
+ * PDF   -> pdf-parse + parsePdfText (detecção por instituição)
+ * Excel -> extrato de conta Itaú (.xls) ou fatura Itaú (.xlsx), detectado automaticamente
  * Nada é gravado aqui: devolve a prévia.
  */
 export async function POST(req: NextRequest) {
@@ -29,7 +30,7 @@ export async function POST(req: NextRequest) {
   const file = form.get("file") as File | null;
   const documentType = String(form.get("document_type") ?? "");
   const accountId = String(form.get("account_id") ?? "");
-  if (!file) return NextResponse.json({ error: "Envie um arquivo PDF ou XLSX." }, { status: 400 });
+  if (!file) return NextResponse.json({ error: "Envie um arquivo PDF ou Excel." }, { status: 400 });
 
   const buf = Buffer.from(await file.arrayBuffer());
   const fileHash = createHash("sha256").update(buf).digest("hex");
@@ -40,17 +41,22 @@ export async function POST(req: NextRequest) {
     .eq("file_hash", fileHash)
     .maybeSingle();
 
-  // Detecta o tipo de arquivo: XLSX (Excel) ou PDF
-  const isXlsx = /\.xlsx$/i.test(file.name)
+  // Detecta se é um arquivo Excel (.xlsx OU .xls legado do Itaú)
+  const isExcel = /\.xlsx?$/i.test(file.name)
     || file.type.includes("spreadsheetml")
-    || file.type.includes("excel");
+    || file.type.includes("excel")
+    || file.type.includes("ms-excel");
 
   let result;
-  if (isXlsx) {
+  if (isExcel) {
     try {
-      result = parseItauFaturaXlsx(buf);
+      // Extrato de conta corrente (.xls) e fatura de cartão (.xlsx) têm layouts
+      // diferentes: detecta qual é antes de escolher o parser.
+      result = isItauExtratoXls(buf)
+        ? parseItauExtratoXls(buf)
+        : parseItauFaturaXlsx(buf);
     } catch {
-      return NextResponse.json({ error: "Não foi possível ler o arquivo XLSX." }, { status: 422 });
+      return NextResponse.json({ error: "Não foi possível ler o arquivo Excel." }, { status: 422 });
     }
   } else {
     let text = "";
