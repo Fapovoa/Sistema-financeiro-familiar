@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Header } from "@/components/layout/Header";
 import { ManualExpenseForm } from "@/components/ManualExpenseForm";
+import { DespesasTable } from "@/components/DespesasTable";
 import { createClient } from "@/lib/supabase/server";
 import { brl, brDate } from "@/lib/format";
 import clsx from "clsx";
@@ -20,7 +21,6 @@ const PERIODS = [
   { key: "personalizado", label: "Personalizado" },
 ] as const;
 
-// Converte a opção escolhida em datas de início e fim (yyyy-MM-dd).
 function resolvePeriodo(periodo: string, de: string, ate: string) {
   const hoje = new Date();
   let start: Date, end: Date;
@@ -35,7 +35,7 @@ function resolvePeriodo(periodo: string, de: string, ate: string) {
     case "personalizado": {
       const d = /^\d{4}-\d{2}-\d{2}$/.test(de) ? new Date(de + "T12:00:00") : startOfMonth(hoje);
       const a = /^\d{4}-\d{2}-\d{2}$/.test(ate) ? new Date(ate + "T12:00:00") : endOfMonth(hoje);
-      start = d <= a ? d : a;   // se inverter as datas por engano, corrige sozinho
+      start = d <= a ? d : a;
       end = d <= a ? a : d;
       break;
     }
@@ -48,6 +48,7 @@ function resolvePeriodo(periodo: string, de: string, ate: string) {
  * Página geral de despesas com duas visões:
  * - caixa: só affects_cash_flow=true (fatura total no vencimento; compras do cartão ficam de fora)
  * - analitica: só affects_category_report=true (compras individuais do cartão entram aqui)
+ * A tabela (com edição) é um componente client; a leitura continua no server.
  */
 export default async function DespesasPage({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const sp = await searchParams;
@@ -65,7 +66,7 @@ export default async function DespesasPage({ searchParams }: { searchParams: Pro
   const supabase = await createClient();
 
   let query = supabase.from("transactions")
-    .select("id, transaction_date, due_date, description_clean, description_original, amount, status, source, is_card_purchase, is_installment, installment_number, installment_total, is_recurring, categories(name, color)")
+    .select("id, transaction_date, due_date, description_clean, description_original, amount, status, source, is_card_purchase, is_installment, installment_number, installment_total, is_recurring, category_id, categories(name, color)")
     .lt("amount", 0)
     .neq("type", "ignored")
     .gte("transaction_date", startISO).lte("transaction_date", endISO)
@@ -147,55 +148,7 @@ export default async function DespesasPage({ searchParams }: { searchParams: Pro
           <span className="block text-xs text-ink-400">As datas “De/Até” só valem quando o período está em “Personalizado”.</span>
         </p>
 
-        <div className="card overflow-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-left text-xs uppercase text-ink-500">
-              <tr>
-                <th className="px-4 py-3">Data</th>
-                <th className="px-4 py-3">Descrição</th>
-                <th className="px-4 py-3">Categoria</th>
-                <th className="px-4 py-3">Origem</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3 text-right">Valor</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {list.map((t: any) => (
-                <tr key={t.id} className="hover:bg-slate-50/60">
-                  <td className="whitespace-nowrap px-4 py-2.5">{brDate(t.transaction_date)}</td>
-                  <td className="px-4 py-2.5">
-                    <p className="font-medium">{t.description_clean}</p>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="h-2 w-2 rounded-full" style={{ background: t.categories?.color ?? "#CBD5E1" }} />
-                      {t.categories?.name ?? "Não categorizado"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-xs text-ink-500">
-                    {t.source === "invoice_total" ? "Fatura de cartão" :
-                     t.is_card_purchase ? "Compra no cartão" :
-                     t.source === "manual" ? "Manual" : "Extrato"}
-                    {t.is_installment && ` · ${t.installment_number}/${t.installment_total}`}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className={clsx("rounded-md px-2 py-0.5 text-xs font-semibold",
-                      t.status === "paid" && "bg-success-bg text-success-fg",
-                      t.status === "forecast" && "bg-brand-50 text-brand-600",
-                      t.status === "pending" && "bg-warn-bg text-warn-fg",
-                      t.status === "confirmed" && "bg-slate-100 text-ink-700")}>
-                      {{ paid: "pago", forecast: "previsto", pending: "pendente", confirmed: "confirmado" }[t.status as string] ?? t.status}
-                    </span>
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-2.5 text-right font-semibold text-danger-fg">{brl(t.amount)}</td>
-                </tr>
-              ))}
-              {list.length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-ink-500">Nenhuma despesa no período com esses filtros.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        <DespesasTable rows={list as any} cats={cats ?? []} />
       </div>
     </>
   );
