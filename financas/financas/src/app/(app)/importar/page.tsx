@@ -91,6 +91,11 @@ export default function ImportarPage() {
     setRows((r) => r.map((row, idx) => (idx === i ? { ...row, ...patch } : row)));
   }
 
+  // Habilita "Confirmar" sempre que houver algo a gravar (importar ou reconciliar),
+  // mesmo que o arquivo já tenha sido visto antes. A proteção contra duplicados é
+  // por linha (duplicados já vêm como "ignorar"), então não há risco de duplicar.
+  const actionableCount = rows.filter((r) => r.action === "import" || r.action === "reconcile").length;
+
   return (
     <>
       <Header title="Importação de documentos" />
@@ -116,7 +121,7 @@ export default function ImportarPage() {
           </label>
           <label className="text-sm md:col-span-1">
             <span className="mb-1 block font-medium">Arquivo (PDF ou Excel)</span>
-            <input type="file" accept=".pdf,.xlsx,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="input"
+            <input type="file" accept=".pdf,.xls,.xlsx,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="input"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </label>
           <div className="flex items-end">
@@ -161,15 +166,20 @@ export default function ImportarPage() {
                 )}
                 {preview.already_imported && (
                   <p className="mt-1 flex items-center gap-1 text-sm text-warn-fg">
-                    <Copy size={14} /> Este arquivo já foi importado antes ({preview.already_imported.file_name}).
+                    <Copy size={14} /> Este arquivo já foi importado antes ({preview.already_imported.file_name}). Lançamentos duplicados já vêm marcados como “ignorar”; confirme para gravar apenas os novos e os para reconciliar.
                   </p>
                 )}
                 {preview.warnings?.map((w: string, i: number) => (
                   <p key={i} className="mt-1 flex items-center gap-1 text-sm text-warn-fg"><AlertTriangle size={14} /> {w}</p>
                 ))}
               </div>
-              <button className="btn-primary" onClick={confirm} disabled={loading || !!preview.already_imported}>
-                <CheckCircle2 size={16} /> Confirmar importação
+              <button
+                className="btn-primary"
+                onClick={confirm}
+                disabled={loading || actionableCount === 0}
+                title={actionableCount === 0 ? "Nenhum lançamento marcado para importar ou reconciliar" : undefined}
+              >
+                <CheckCircle2 size={16} /> Confirmar importação ({actionableCount})
               </button>
             </div>
             <div className="max-h-[32rem] overflow-auto">
