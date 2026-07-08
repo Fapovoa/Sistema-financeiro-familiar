@@ -1,389 +1,187 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "crypto";
+// import direto do lib evita bug do pdf-parse que tenta ler arquivo de teste
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pdf = require("pdf-parse/lib/pdf-parse.js");
 import { createClient } from "@/lib/supabase/server";
 import { FAMILY_USER_ID } from "@/lib/user";
-import { txHash } from "@/lib/engine/dedupe";
-import { projectFutureInstallments } from "@/lib/engine/installments";
+import { parsePdfText } from "@/lib/parsers";
+import { parseItauFaturaXlsx } from "@/lib/parsers/itau-fatura-xlsx";
+import { parseItauExtratoXls, isItauExtratoXls } from "@/lib/parsers/itau-extrato-xls";
+import { evaluateDuplicate, ExistingTx } from "@/lib/engine/dedupe";
+import { suggestCategory } from "@/lib/engine/categorize";
 import { normalizeDescription } from "@/lib/parsers/normalize";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-type IncomingTx = {
-  transaction_date: string;
-  description_original: string;
-  description_clean: string;
-  amount: number;
-  type: string;
-  category_id: string | null;
-  confidence_score: number;
-  is_installment: boolean;
-  installment_number: number | null;
-  installment_total: number | null;
-  is_recurring_candidate: boolean;
-  is_card_purchase: boolean;
-  learn_rename?: boolean;
-  invoice_reference_month?: string | null;
-  invoice_due_date?: string | null;
-  affects_cash_flow: boolean;
-  affects_category_report: boolean;
-  deduplication_status: string;
-  duplicate_match_id?: string | null;
-  action: "import" | "ignore" | "audit" | "reconcile";
-};
+/**
+ * REGRA — Remanejos internos entre contas da própria família.
+ * PIX entre as contas de vocês (ex.: Itaci, Fernando Aquino Póvoa) são apenas
+ * movimentação de dinheiro entre contas monitoradas — NÃO são despesas. Qualquer
+ * lançamento cuja descrição casar com um destes padrões é tratado como
+ * "transfer" e, portanto, não entra como despesa.
+ *
+ * PARA ADICIONAR/EDITAR NOMES: inclua um padrão nesta lista. Use \b...\b para
+ * casar a palavra inteira e evitar falsos positivos (ex.: /\bITACI\b/i).
+ */
+const INTERNAL_TRANSFER_PATTERNS: RegExp[] = [
+  /\bITACI\b/i,
+  /FERNANDO\s+AQUINO/i,
+  /AQUINO\s+P[ÓO]VOA/i,
+];
 
 /**
- * POST /api/import/confirm
- * Grava definitivamente a prévia confirmada pelo usuário. A lógica de gravação é
- * idêntica à anterior; a diferença é que os lançamentos são processados em LOTES
- * PARALELOS (em vez de um a um em fila), para responder em segundos e não estourar
- * o tempo limite da função (o que fazia a mensagem de sucesso nunca aparecer).
- *
- * Observação: linhas de PARCELAMENTO são processadas em série (fora do paralelo),
- * porque compartilham "grupos de parcela" e não podem competir entre si.
+ * POST /api/import/parse
+ * FormData: file (PDF ou Excel), document_type, account_id, reference_month
+ * PDF   -> pdf-parse + parsePdfText (detecção por instituição)
+ * Excel -> extrato de conta Itaú (.xls) ou fatura Itaú (.xlsx), detectado automaticamente
+ * Nada é gravado aqui: devolve a prévia.
  */
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
   const user = { id: FAMILY_USER_ID }; // autenticação desativada
 
-  const body = await req.json();
-  const {
-    file_hash, file_name, file_path, document_type, account_id,
-    institution, invoice, transactions,
-  } = body as {
-    file_hash: string; file_name: string; file_path: string | null;
-    document_type: "bank_statement" | "credit_card_statement";
-    account_id: string; institution: string | null;
-    invoice: { total_amount: number | null; due_date: string | null; closing_date: string | null; reference_month: string | null } | null;
-    transactions: IncomingTx[];
-  };
+  const form = await req.formData();
+  const file = form.get("file") as File | null;
+  const documentType = String(form.get("document_type") ?? "");
+  const accountId = String(form.get("account_id") ?? "");
+  if (!file) return NextResponse.json({ error: "Envie um arquivo PDF ou Excel." }, { status: 400 });
 
-  // 1. documento
-  const { data: doc, error: docErr } = await supabase
+  const buf = Buffer.from(await file.arrayBuffer());
+  const fileHash = createHash("sha256").update(buf).digest("hex");
+
+  const { data: existingDoc } = await supabase
     .from("documents")
-    .upsert(
-      {
-        user_id: user.id,
-        account_id,
-        file_name,
-        file_url: file_path,
-        document_type,
-        institution,
-        reference_month: invoice?.reference_month ? invoice.reference_month + "-01" : null,
-        file_hash,
-        import_status: "imported",
-      },
-      { onConflict: "user_id,file_hash" }
-    )
-    .select("id")
-    .single();
-  if (docErr || !doc) return NextResponse.json({ error: docErr?.message }, { status: 500 });
+    .select("id, import_status, file_name")
+    .eq("file_hash", fileHash)
+    .maybeSingle();
 
-  // 2. fatura (se documento é fatura de cartão)
-  let invoiceId: string | null = null;
-  if (document_type === "credit_card_statement" && invoice?.reference_month && invoice.due_date) {
-    const { data: inv } = await supabase
-      .from("credit_card_invoices")
-      .upsert(
-        {
-          user_id: user.id,
-          account_id,
-          document_id: doc.id,
-          reference_month: invoice.reference_month + "-01",
-          closing_date: invoice.closing_date,
-          due_date: invoice.due_date,
-          total_amount: invoice.total_amount ?? 0,
-          status: "closed",
-        },
-        { onConflict: "user_id,account_id,reference_month" }
-      )
-      .select("id, cash_flow_transaction_id")
-      .single();
-    invoiceId = inv?.id ?? null;
+  // Detecta se é um arquivo Excel (.xlsx OU .xls legado do Itaú)
+  const isExcel = /\.xlsx?$/i.test(file.name)
+    || file.type.includes("spreadsheetml")
+    || file.type.includes("excel")
+    || file.type.includes("ms-excel");
 
-    // lançamento consolidado da fatura no vencimento (impacta o caixa)
-    if (invoiceId && invoice.total_amount && !inv?.cash_flow_transaction_id) {
-      const { data: cft } = await supabase
-        .from("transactions")
-        .insert({
-          user_id: user.id,
-          account_id,
-          document_id: doc.id,
-          invoice_id: invoiceId,
-          type: "expense",
-          description_original: `Fatura ${institution ?? "cartão"} — ${invoice.reference_month}`,
-          description_clean: `Fatura ${institution ?? "Cartão"}`,
-          amount: -Math.abs(invoice.total_amount),
-          transaction_date: invoice.due_date,
-          due_date: invoice.due_date,
-          competence_month: invoice.reference_month + "-01",
-          status: "pending",
-          source: "invoice_total",
-          is_card_purchase: false,
-          affects_cash_flow: true,          // ÚNICO impacto da fatura no caixa
-          affects_category_report: false,   // evita dupla contagem analítica
-          duplicate_hash: txHash(user.id, invoice.due_date, -Math.abs(invoice.total_amount), "fatura " + (institution ?? "")),
-        })
-        .select("id")
-        .single();
-      if (cft) {
-        await supabase.from("credit_card_invoices").update({ cash_flow_transaction_id: cft.id }).eq("id", invoiceId);
-      }
+  let result;
+  if (isExcel) {
+    try {
+      // Extrato de conta corrente (.xls) e fatura de cartão (.xlsx) têm layouts
+      // diferentes: detecta qual é antes de escolher o parser.
+      result = isItauExtratoXls(buf)
+        ? parseItauExtratoXls(buf)
+        : parseItauFaturaXlsx(buf);
+    } catch {
+      return NextResponse.json({ error: "Não foi possível ler o arquivo Excel." }, { status: 422 });
     }
+  } else {
+    let text = "";
+    try {
+      const parsed = await pdf(buf);
+      text = parsed.text ?? "";
+    } catch {
+      return NextResponse.json({ error: "Não foi possível ler o PDF." }, { status: 422 });
+    }
+    result = parsePdfText(text);
   }
 
-  let imported = 0, ignored = 0, audits = 0, reconciled = 0, skipped = 0;
-
-  // IDEMPOTÊNCIA: evita duplicar ao reimportar/reconfirmar o mesmo arquivo.
-  // Buscamos, de uma vez, quais "impressões digitais" (hash) já existem no banco.
-  const incomingHashes = transactions.map((t) =>
-    txHash(user.id, t.transaction_date, t.amount, t.description_original)
-  );
-  const existing = new Set<string>();
-  for (let i = 0; i < incomingHashes.length; i += 300) {
-    const slice = incomingHashes.slice(i, i + 300);
-    const { data } = await supabase
-      .from("transactions")
-      .select("duplicate_hash")
-      .in("duplicate_hash", slice);
-    for (const r of data ?? []) if (r?.duplicate_hash) existing.add(r.duplicate_hash);
-  }
-  const seen = new Set<string>(); // evita duplicar dentro do próprio lote
-
-  // Processa UMA linha da prévia (mesma lógica de antes). Retorna nada; ajusta contadores.
-  async function processRow(t: IncomingTx) {
-    if (t.action === "ignore") { ignored++; return; }
-
-    // Forecast já existente: confirma o previsto (update), não insere.
-    if (t.deduplication_status === "reconcile" && t.duplicate_match_id) {
-      const h0 = txHash(user.id, t.transaction_date, t.amount, t.description_original);
-      await supabase.from("transactions").update({
-        status: "confirmed",
-        transaction_date: t.transaction_date,
-        amount: t.amount,
-        description_original: t.description_original,
-        document_id: doc.id,
-        duplicate_hash: h0,
-      }).eq("id", t.duplicate_match_id);
-      reconciled++;
-      return;
+  // Regra: PIX entre contas da própria família são REMANEJOS internos, não despesas.
+  // Reclassifica como "transfer" (o filtro abaixo então os deixa de fora).
+  result.transactions = result.transactions.map((t) => {
+    if (INTERNAL_TRANSFER_PATTERNS.some((re) => re.test(t.description_original ?? ""))) {
+      return { ...t, type: "transfer" as const, affects_cash_flow: false, affects_category_report: false };
     }
-
-    // Guarda de idempotência (síncrona, antes de qualquer await): se já existe, pula.
-    const hash = txHash(user.id, t.transaction_date, t.amount, t.description_original);
-    if (existing.has(hash) || seen.has(hash)) { skipped++; return; }
-    seen.add(hash);
-
-    // Usuário renomeou na prévia: aprende a regra para as próximas importações
-    if (t.learn_rename && t.description_clean?.trim()) {
-      const np = normalizeDescription(t.description_original);
-      if (np.length >= 3) {
-        await supabase.from("rename_rules").upsert({
-          user_id: user.id,
-          pattern: t.description_original,
-          normalized_pattern: np,
-          new_name: t.description_clean.trim(),
-          updated_at: new Date().toISOString(),
-        }, { onConflict: "user_id,normalized_pattern" });
-      }
-    }
-
-    // Reconciliação: pagamento de fatura no extrato -> marca fatura paga, não duplica despesa
-    if (t.action === "reconcile" || t.type === "credit_card_payment") {
-      const { data: openInv } = await supabase
-        .from("credit_card_invoices")
-        .select("id, total_amount")
-        .in("status", ["open", "closed", "overdue", "pending"])
-        .eq("total_amount", Math.abs(t.amount))
-        .order("due_date", { ascending: true })
-        .limit(1)
-        .maybeSingle();
-
-      const { data: payTx } = await supabase
-        .from("transactions")
-        .insert({
-          user_id: user.id, account_id, document_id: doc.id,
-          invoice_id: openInv?.id ?? null,
-          type: "credit_card_payment",
-          description_original: t.description_original,
-          description_clean: t.description_clean,
-          amount: t.amount,
-          transaction_date: t.transaction_date,
-          status: "paid", source: "pdf_import",
-          affects_cash_flow: !openInv,      // se reconciliou, a fatura já representa o caixa
-          affects_category_report: false,
-          duplicate_hash: hash,
-        })
-        .select("id").single();
-
-      if (openInv && payTx) {
-        await supabase.from("credit_card_invoices")
-          .update({ status: "paid", payment_transaction_id: payTx.id })
-          .eq("id", openInv.id);
-        // lançamento consolidado da fatura passa a "paid"
-        await supabase.from("transactions")
-          .update({ status: "paid", payment_date: t.transaction_date })
-          .eq("invoice_id", openInv.id).eq("source", "invoice_total");
-        reconciled++;
-      }
-      return;
-    }
-
-    const { data: inserted, error: insErr } = await supabase
-      .from("transactions")
-      .insert({
-        user_id: user.id,
-        account_id,
-        category_id: t.category_id,
-        document_id: doc.id,
-        invoice_id: t.is_card_purchase ? invoiceId : null,
-        installment_group_id: null,
-        type: t.type,
-        description_original: t.description_original,
-        description_clean: t.description_clean,
-        amount: t.amount,
-        transaction_date: t.transaction_date,
-        due_date: t.invoice_due_date ?? null,
-        competence_month: t.invoice_reference_month ? t.invoice_reference_month + "-01" : null,
-        status: "paid",
-        source: "pdf_import",
-        is_recurring: false,
-        is_installment: t.is_installment,
-        installment_number: t.installment_number,
-        installment_total: t.installment_total,
-        is_card_purchase: t.is_card_purchase,
-        affects_cash_flow: t.is_card_purchase ? false : t.affects_cash_flow,
-        affects_category_report: t.affects_category_report,
-        duplicate_hash: hash,
-        confidence_score: t.confidence_score,
-      })
-      .select("id")
-      .single();
-    if (insErr || !inserted) return;
-    imported++;
-
-    // Auditoria para baixa confiança
-    if (t.action === "audit" || (t.confidence_score < 0.5 && t.type === "expense")) {
-      await supabase.from("audit_items").insert({
-        user_id: user.id,
-        transaction_id: inserted.id,
-        reason: t.category_id ? "Baixa confiança na categorização" : "Sem categoria identificada",
-        suggested_category_id: t.category_id,
-        confidence_score: t.confidence_score,
-      });
-      audits++;
-    }
-  }
-
-  // Processa UMA linha de PARCELAMENTO (mantida em série: grupos de parcela são compartilhados).
-  async function processInstallmentRow(t: IncomingTx) {
-    if (t.action === "ignore") { ignored++; return; }
-
-    const hash = txHash(user.id, t.transaction_date, t.amount, t.description_original);
-    if (existing.has(hash) || seen.has(hash)) { skipped++; return; }
-    seen.add(hash);
-
-    if (t.learn_rename && t.description_clean?.trim()) {
-      const np = normalizeDescription(t.description_original);
-      if (np.length >= 3) {
-        await supabase.from("rename_rules").upsert({
-          user_id: user.id, pattern: t.description_original, normalized_pattern: np,
-          new_name: t.description_clean.trim(), updated_at: new Date().toISOString(),
-        }, { onConflict: "user_id,normalized_pattern" });
-      }
-    }
-
-    let groupId: string | null = null;
-    if (t.installment_total) {
-      const base = normalizeDescription(t.description_clean);
-      const { data: g } = await supabase
-        .from("installment_groups").select("id")
-        .eq("description_base", base).eq("total_installments", t.installment_total).maybeSingle();
-      if (g) groupId = g.id;
-      else {
-        const { data: ng } = await supabase
-          .from("installment_groups")
-          .insert({
-            user_id: user.id, account_id, description_base: base,
-            merchant_name: t.description_clean, total_installments: t.installment_total,
-            first_installment_date: t.transaction_date, amount_per_installment: Math.abs(t.amount),
-            total_amount: Math.abs(t.amount) * t.installment_total,
-          })
-          .select("id").single();
-        groupId = ng?.id ?? null;
-      }
-    }
-
-    const { data: inserted, error: insErr } = await supabase
-      .from("transactions")
-      .insert({
-        user_id: user.id, account_id, category_id: t.category_id, document_id: doc.id,
-        invoice_id: t.is_card_purchase ? invoiceId : null, installment_group_id: groupId,
-        type: t.type, description_original: t.description_original, description_clean: t.description_clean,
-        amount: t.amount, transaction_date: t.transaction_date, due_date: t.invoice_due_date ?? null,
-        competence_month: t.invoice_reference_month ? t.invoice_reference_month + "-01" : null,
-        status: "paid", source: "pdf_import", is_recurring: false,
-        is_installment: t.is_installment, installment_number: t.installment_number,
-        installment_total: t.installment_total, is_card_purchase: t.is_card_purchase,
-        affects_cash_flow: t.is_card_purchase ? false : t.affects_cash_flow,
-        affects_category_report: t.affects_category_report, duplicate_hash: hash,
-        confidence_score: t.confidence_score,
-      })
-      .select("id").single();
-    if (insErr || !inserted) return;
-    imported++;
-
-    if (t.action === "audit" || (t.confidence_score < 0.5 && t.type === "expense")) {
-      await supabase.from("audit_items").insert({
-        user_id: user.id, transaction_id: inserted.id,
-        reason: t.category_id ? "Baixa confiança na categorização" : "Sem categoria identificada",
-        suggested_category_id: t.category_id, confidence_score: t.confidence_score,
-      });
-      audits++;
-    }
-
-    if (t.installment_number && t.installment_total && t.invoice_reference_month && groupId) {
-      const futures = projectFutureInstallments({
-        currentNumber: t.installment_number, totalInstallments: t.installment_total,
-        amount: t.amount, purchaseDateISO: t.transaction_date, invoiceRefMonth: t.invoice_reference_month,
-      });
-      for (const f of futures) {
-        const fHash = txHash(user.id, f.transaction_date, f.amount, t.description_clean + " parc " + f.installment_number);
-        const { data: dupF } = await supabase.from("transactions").select("id").eq("duplicate_hash", fHash).maybeSingle();
-        if (dupF) continue;
-        await supabase.from("transactions").insert({
-          user_id: user.id, account_id, category_id: t.category_id, installment_group_id: groupId,
-          type: "expense",
-          description_original: `${t.description_clean} — parcela ${f.installment_number}/${t.installment_total} (prevista)`,
-          description_clean: t.description_clean, amount: f.amount, transaction_date: f.transaction_date,
-          competence_month: f.invoice_reference_month + "-01", status: "forecast", source: "installment_forecast",
-          is_installment: true, installment_number: f.installment_number, installment_total: t.installment_total,
-          is_card_purchase: true, affects_cash_flow: false, affects_category_report: true, duplicate_hash: fHash,
-        });
-      }
-    }
-  }
-
-  // Parcelamentos em série (poucos e compartilham grupo); o resto em lotes paralelos.
-  const installmentRows = transactions.filter((t) => t.is_installment && t.installment_total);
-  const normalRows = transactions.filter((t) => !(t.is_installment && t.installment_total));
-
-  for (const t of installmentRows) await processInstallmentRow(t);
-
-  const CHUNK = 15;
-  for (let i = 0; i < normalRows.length; i += CHUNK) {
-    await Promise.all(normalRows.slice(i, i + CHUNK).map((t) => processRow(t)));
-  }
-
-  await supabase.from("import_batches").insert({
-    user_id: user.id,
-    document_id: doc.id,
-    status: "done",
-    total_transactions_found: transactions.length,
-    total_imported: imported,
-    total_duplicates: ignored + skipped,
-    total_audit: audits,
+    return t;
   });
 
-  // "skipped" = lançamentos que já existiam (reimport/reconfirm) e foram evitados.
-  return NextResponse.json({ ok: true, imported, ignored: ignored + skipped, audits, reconciled, skipped, document_id: doc.id });
+  // Receita é lançada manualmente: a importação traz APENAS despesas.
+  // (credit_card_payment = pagamento de fatura, mantido só para reconciliar a
+  //  fatura registrada; não vira despesa nova nem receita.)
+  result.transactions = result.transactions.filter(
+    (t) => t.type === "expense" || t.type === "credit_card_payment"
+  );
+
+  // Regras de categorização aprendidas do usuário (camada 1)
+  const { data: rules } = await supabase
+    .from("categorization_rules")
+    .select("normalized_pattern, category_id, confidence");
+
+  const { data: renames } = await supabase
+    .from("rename_rules")
+    .select("normalized_pattern, new_name");
+
+  const { data: categories } = await supabase
+    .from("categories")
+    .select("id, name, type");
+  const catByName = new Map((categories ?? []).map((c) => [c.name.toLowerCase() + ":" + c.type, c.id]));
+
+  const dates = result.transactions.map((t) => t.transaction_date).sort();
+  let existing: ExistingTx[] = [];
+  if (dates.length) {
+    const { data } = await supabase
+      .from("transactions")
+      .select("id, transaction_date, amount, description_clean, status, source, is_installment, installment_number")
+      .gte("transaction_date", dates[0])
+      .lte("transaction_date", dates[dates.length - 1]);
+    existing = (data as ExistingTx[]) ?? [];
+  }
+
+  const preview = result.transactions.map((t) => {
+    let description_clean = t.description_clean;
+    const norm = normalizeDescription(t.description_original);
+    for (const r of renames ?? []) {
+      if (!r.normalized_pattern) continue;
+      if (norm.includes(r.normalized_pattern) || r.normalized_pattern.includes(norm)) {
+        description_clean = r.new_name;
+        break;
+      }
+    }
+    const ruled = suggestCategory(t.description_original, (rules ?? []) as never);
+    let category_id: string | null = null;
+    let category_name = t.category_suggestion;
+    let confidence = t.confidence_score;
+    if (ruled.category_id) {
+      category_id = ruled.category_id;
+      confidence = ruled.confidence;
+      category_name = (categories ?? []).find((c) => c.id === ruled.category_id)?.name ?? category_name;
+    } else if (t.category_suggestion) {
+      const key = t.category_suggestion.toLowerCase() + ":" + (t.type === "income" ? "income" : "expense");
+      category_id = catByName.get(key) ?? null;
+    }
+
+    const dup = evaluateDuplicate(
+      { dateISO: t.transaction_date, amount: t.amount, desc: t.description_clean, installment_number: t.installment_number },
+      existing
+    );
+    const deduplication_status = t.deduplication_status === "reconcile" ? "reconcile" : dup.status;
+    const suggested_action =
+      deduplication_status === "possible_duplicate" ? "ignore"
+      : deduplication_status === "reconcile" ? "reconcile"
+      : confidence < 0.5 && t.type === "expense" ? "audit"
+      : t.suggested_action;
+
+    return { ...t, description_clean, category_id, category_suggestion: category_name, confidence_score: confidence, deduplication_status, duplicate_match_id: dup.matchId, suggested_action };
+  });
+
+  return NextResponse.json({
+    already_imported: existingDoc?.import_status === "imported" ? existingDoc : null,
+    file_hash: fileHash,
+    file_name: file.name,
+    document_type: documentType || result.detected_type,
+    account_id: accountId || null,
+    detected: {
+      type: result.detected_type,
+      institution: result.detected_institution,
+      invoice: result.invoice ?? null,
+    },
+    warnings: result.warnings,
+    transactions: preview,
+    summary: {
+      found: preview.length,
+      new: preview.filter((t) => t.deduplication_status === "new").length,
+      duplicates: preview.filter((t) => t.deduplication_status === "possible_duplicate").length,
+      reconcile: preview.filter((t) => t.deduplication_status === "reconcile").length,
+      audit: preview.filter((t) => t.suggested_action === "audit").length,
+    },
+  });
 }
