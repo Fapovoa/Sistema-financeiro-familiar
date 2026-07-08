@@ -33,13 +33,13 @@ type IncomingTx = {
 
 /**
  * POST /api/import/confirm
- * Grava definitivamente a prévia confirmada pelo usuário:
- *  - documento + storage já enviados pelo cliente (file_path)
- *  - fatura de cartão (upsert por competência) + lançamento consolidado no vencimento
- *  - lançamentos individuais (cartão: affects_cash_flow=false)
- *  - projeção de parcelas futuras (status=forecast) nas faturas futuras
- *  - reconciliação: pagamento de fatura no extrato marca a fatura como paga
- *  - itens de baixa confiança viram audit_items
+ * Grava definitivamente a prévia confirmada pelo usuário. A lógica de gravação é
+ * idêntica à anterior; a diferença é que os lançamentos são processados em LOTES
+ * PARALELOS (em vez de um a um em fila), para responder em segundos e não estourar
+ * o tempo limite da função (o que fazia a mensagem de sucesso nunca aparecer).
+ *
+ * Observação: linhas de PARCELAMENTO são processadas em série (fora do paralelo),
+ * porque compartilham "grupos de parcela" e não podem competir entre si.
  */
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
@@ -131,10 +131,47 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  let imported = 0, ignored = 0, audits = 0, reconciled = 0;
+  let imported = 0, ignored = 0, audits = 0, reconciled = 0, skipped = 0;
 
-  for (const t of transactions) {
-    if (t.action === "ignore") { ignored++; continue; }
+  // IDEMPOTÊNCIA: evita duplicar ao reimportar/reconfirmar o mesmo arquivo.
+  // Buscamos, de uma vez, quais "impressões digitais" (hash) já existem no banco.
+  const incomingHashes = transactions.map((t) =>
+    txHash(user.id, t.transaction_date, t.amount, t.description_original)
+  );
+  const existing = new Set<string>();
+  for (let i = 0; i < incomingHashes.length; i += 300) {
+    const slice = incomingHashes.slice(i, i + 300);
+    const { data } = await supabase
+      .from("transactions")
+      .select("duplicate_hash")
+      .in("duplicate_hash", slice);
+    for (const r of data ?? []) if (r?.duplicate_hash) existing.add(r.duplicate_hash);
+  }
+  const seen = new Set<string>(); // evita duplicar dentro do próprio lote
+
+  // Processa UMA linha da prévia (mesma lógica de antes). Retorna nada; ajusta contadores.
+  async function processRow(t: IncomingTx) {
+    if (t.action === "ignore") { ignored++; return; }
+
+    // Forecast já existente: confirma o previsto (update), não insere.
+    if (t.deduplication_status === "reconcile" && t.duplicate_match_id) {
+      const h0 = txHash(user.id, t.transaction_date, t.amount, t.description_original);
+      await supabase.from("transactions").update({
+        status: "confirmed",
+        transaction_date: t.transaction_date,
+        amount: t.amount,
+        description_original: t.description_original,
+        document_id: doc.id,
+        duplicate_hash: h0,
+      }).eq("id", t.duplicate_match_id);
+      reconciled++;
+      return;
+    }
+
+    // Guarda de idempotência (síncrona, antes de qualquer await): se já existe, pula.
+    const hash = txHash(user.id, t.transaction_date, t.amount, t.description_original);
+    if (existing.has(hash) || seen.has(hash)) { skipped++; return; }
+    seen.add(hash);
 
     // Usuário renomeou na prévia: aprende a regra para as próximas importações
     if (t.learn_rename && t.description_clean?.trim()) {
@@ -174,7 +211,7 @@ export async function POST(req: NextRequest) {
           status: "paid", source: "pdf_import",
           affects_cash_flow: !openInv,      // se reconciliou, a fatura já representa o caixa
           affects_category_report: false,
-          duplicate_hash: txHash(user.id, t.transaction_date, t.amount, t.description_original),
+          duplicate_hash: hash,
         })
         .select("id").single();
 
@@ -188,51 +225,7 @@ export async function POST(req: NextRequest) {
           .eq("invoice_id", openInv.id).eq("source", "invoice_total");
         reconciled++;
       }
-      continue;
-    }
-
-    // Grupo de parcelamento
-    let groupId: string | null = null;
-    if (t.is_installment && t.installment_total) {
-      const base = normalizeDescription(t.description_clean);
-      const { data: g } = await supabase
-        .from("installment_groups")
-        .select("id")
-        .eq("description_base", base)
-        .eq("total_installments", t.installment_total)
-        .maybeSingle();
-      if (g) groupId = g.id;
-      else {
-        const { data: ng } = await supabase
-          .from("installment_groups")
-          .insert({
-            user_id: user.id, account_id,
-            description_base: base,
-            merchant_name: t.description_clean,
-            total_installments: t.installment_total,
-            first_installment_date: t.transaction_date,
-            amount_per_installment: Math.abs(t.amount),
-            total_amount: Math.abs(t.amount) * t.installment_total,
-          })
-          .select("id").single();
-        groupId = ng?.id ?? null;
-      }
-    }
-
-    const hash = txHash(user.id, t.transaction_date, t.amount, t.description_original);
-
-    // Se existe forecast compatível, confirma em vez de inserir
-    if (t.deduplication_status === "reconcile" && t.duplicate_match_id) {
-      await supabase.from("transactions").update({
-        status: "confirmed",
-        transaction_date: t.transaction_date,
-        amount: t.amount,
-        description_original: t.description_original,
-        document_id: doc.id,
-        duplicate_hash: hash,
-      }).eq("id", t.duplicate_match_id);
-      reconciled++;
-      continue;
+      return;
     }
 
     const { data: inserted, error: insErr } = await supabase
@@ -243,7 +236,7 @@ export async function POST(req: NextRequest) {
         category_id: t.category_id,
         document_id: doc.id,
         invoice_id: t.is_card_purchase ? invoiceId : null,
-        installment_group_id: groupId,
+        installment_group_id: null,
         type: t.type,
         description_original: t.description_original,
         description_clean: t.description_clean,
@@ -265,7 +258,7 @@ export async function POST(req: NextRequest) {
       })
       .select("id")
       .single();
-    if (insErr || !inserted) continue;
+    if (insErr || !inserted) return;
     imported++;
 
     // Auditoria para baixa confiança
@@ -279,44 +272,106 @@ export async function POST(req: NextRequest) {
       });
       audits++;
     }
+  }
 
-    // Projeção de parcelas futuras (forecast dentro das faturas futuras)
-    if (t.is_installment && t.installment_number && t.installment_total && t.invoice_reference_month && groupId) {
+  // Processa UMA linha de PARCELAMENTO (mantida em série: grupos de parcela são compartilhados).
+  async function processInstallmentRow(t: IncomingTx) {
+    if (t.action === "ignore") { ignored++; return; }
+
+    const hash = txHash(user.id, t.transaction_date, t.amount, t.description_original);
+    if (existing.has(hash) || seen.has(hash)) { skipped++; return; }
+    seen.add(hash);
+
+    if (t.learn_rename && t.description_clean?.trim()) {
+      const np = normalizeDescription(t.description_original);
+      if (np.length >= 3) {
+        await supabase.from("rename_rules").upsert({
+          user_id: user.id, pattern: t.description_original, normalized_pattern: np,
+          new_name: t.description_clean.trim(), updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id,normalized_pattern" });
+      }
+    }
+
+    let groupId: string | null = null;
+    if (t.installment_total) {
+      const base = normalizeDescription(t.description_clean);
+      const { data: g } = await supabase
+        .from("installment_groups").select("id")
+        .eq("description_base", base).eq("total_installments", t.installment_total).maybeSingle();
+      if (g) groupId = g.id;
+      else {
+        const { data: ng } = await supabase
+          .from("installment_groups")
+          .insert({
+            user_id: user.id, account_id, description_base: base,
+            merchant_name: t.description_clean, total_installments: t.installment_total,
+            first_installment_date: t.transaction_date, amount_per_installment: Math.abs(t.amount),
+            total_amount: Math.abs(t.amount) * t.installment_total,
+          })
+          .select("id").single();
+        groupId = ng?.id ?? null;
+      }
+    }
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("transactions")
+      .insert({
+        user_id: user.id, account_id, category_id: t.category_id, document_id: doc.id,
+        invoice_id: t.is_card_purchase ? invoiceId : null, installment_group_id: groupId,
+        type: t.type, description_original: t.description_original, description_clean: t.description_clean,
+        amount: t.amount, transaction_date: t.transaction_date, due_date: t.invoice_due_date ?? null,
+        competence_month: t.invoice_reference_month ? t.invoice_reference_month + "-01" : null,
+        status: "paid", source: "pdf_import", is_recurring: false,
+        is_installment: t.is_installment, installment_number: t.installment_number,
+        installment_total: t.installment_total, is_card_purchase: t.is_card_purchase,
+        affects_cash_flow: t.is_card_purchase ? false : t.affects_cash_flow,
+        affects_category_report: t.affects_category_report, duplicate_hash: hash,
+        confidence_score: t.confidence_score,
+      })
+      .select("id").single();
+    if (insErr || !inserted) return;
+    imported++;
+
+    if (t.action === "audit" || (t.confidence_score < 0.5 && t.type === "expense")) {
+      await supabase.from("audit_items").insert({
+        user_id: user.id, transaction_id: inserted.id,
+        reason: t.category_id ? "Baixa confiança na categorização" : "Sem categoria identificada",
+        suggested_category_id: t.category_id, confidence_score: t.confidence_score,
+      });
+      audits++;
+    }
+
+    if (t.installment_number && t.installment_total && t.invoice_reference_month && groupId) {
       const futures = projectFutureInstallments({
-        currentNumber: t.installment_number,
-        totalInstallments: t.installment_total,
-        amount: t.amount,
-        purchaseDateISO: t.transaction_date,
-        invoiceRefMonth: t.invoice_reference_month,
+        currentNumber: t.installment_number, totalInstallments: t.installment_total,
+        amount: t.amount, purchaseDateISO: t.transaction_date, invoiceRefMonth: t.invoice_reference_month,
       });
       for (const f of futures) {
         const fHash = txHash(user.id, f.transaction_date, f.amount, t.description_clean + " parc " + f.installment_number);
-        const { data: dupF } = await supabase
-          .from("transactions").select("id").eq("duplicate_hash", fHash).maybeSingle();
+        const { data: dupF } = await supabase.from("transactions").select("id").eq("duplicate_hash", fHash).maybeSingle();
         if (dupF) continue;
         await supabase.from("transactions").insert({
-          user_id: user.id,
-          account_id,
-          category_id: t.category_id,
-          installment_group_id: groupId,
+          user_id: user.id, account_id, category_id: t.category_id, installment_group_id: groupId,
           type: "expense",
           description_original: `${t.description_clean} — parcela ${f.installment_number}/${t.installment_total} (prevista)`,
-          description_clean: t.description_clean,
-          amount: f.amount,
-          transaction_date: f.transaction_date,
-          competence_month: f.invoice_reference_month + "-01",
-          status: "forecast",
-          source: "installment_forecast",
-          is_installment: true,
-          installment_number: f.installment_number,
-          installment_total: t.installment_total,
-          is_card_purchase: true,
-          affects_cash_flow: false,
-          affects_category_report: true,
-          duplicate_hash: fHash,
+          description_clean: t.description_clean, amount: f.amount, transaction_date: f.transaction_date,
+          competence_month: f.invoice_reference_month + "-01", status: "forecast", source: "installment_forecast",
+          is_installment: true, installment_number: f.installment_number, installment_total: t.installment_total,
+          is_card_purchase: true, affects_cash_flow: false, affects_category_report: true, duplicate_hash: fHash,
         });
       }
     }
+  }
+
+  // Parcelamentos em série (poucos e compartilham grupo); o resto em lotes paralelos.
+  const installmentRows = transactions.filter((t) => t.is_installment && t.installment_total);
+  const normalRows = transactions.filter((t) => !(t.is_installment && t.installment_total));
+
+  for (const t of installmentRows) await processInstallmentRow(t);
+
+  const CHUNK = 15;
+  for (let i = 0; i < normalRows.length; i += CHUNK) {
+    await Promise.all(normalRows.slice(i, i + CHUNK).map((t) => processRow(t)));
   }
 
   await supabase.from("import_batches").insert({
@@ -325,9 +380,10 @@ export async function POST(req: NextRequest) {
     status: "done",
     total_transactions_found: transactions.length,
     total_imported: imported,
-    total_duplicates: ignored,
+    total_duplicates: ignored + skipped,
     total_audit: audits,
   });
 
-  return NextResponse.json({ ok: true, imported, ignored, audits, reconciled, document_id: doc.id });
+  // "skipped" = lançamentos que já existiam (reimport/reconfirm) e foram evitados.
+  return NextResponse.json({ ok: true, imported, ignored: ignored + skipped, audits, reconciled, skipped, document_id: doc.id });
 }
