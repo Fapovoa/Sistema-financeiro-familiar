@@ -33,6 +33,7 @@ export default function ImportarPage() {
   const [rows, setRows] = useState<PreviewTx[]>([]);
   const [done, setDone] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number | null>(null); // null = ocioso; 0..100 = importando
 
   useEffect(() => {
     supabase.from("accounts").select("id, name, type").then(({ data }) => setAccounts(data ?? []));
@@ -58,33 +59,67 @@ export default function ImportarPage() {
 
   async function confirm() {
     if (!preview || !file) return;
-    setLoading(true); setError(null);
+    setLoading(true); setError(null); setProgress(0);
 
-    let filePath: string | null = null;
-    {
-      const path = `${FAMILY_USER_ID}/${Date.now()}-${file.name}`;
-      const { error: upErr } = await supabase.storage.from("documents").upload(path, file, { upsert: true });
-      if (!upErr) filePath = path;
+    try {
+      // Sobe o arquivo uma única vez (opcional).
+      let filePath: string | null = null;
+      try {
+        const path = `${FAMILY_USER_ID}/${Date.now()}-${file.name}`;
+        const { error: upErr } = await supabase.storage.from("documents").upload(path, file, { upsert: true });
+        if (!upErr) filePath = path;
+      } catch { /* salvar o arquivo é opcional: segue mesmo sem ele */ }
+
+      // Envia em BLOCOS pequenos e vai marcando o progresso a cada bloco.
+      // Assim a barra anda de verdade e nenhuma requisição fica longa demais.
+      const CHUNK = 30;
+      const chunks: PreviewTx[][] = [];
+      for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK));
+      if (chunks.length === 0) chunks.push([]); // garante ao menos o registro do documento
+
+      const totals = { imported: 0, ignored: 0, audits: 0, reconciled: 0 };
+
+      for (let c = 0; c < chunks.length; c++) {
+        const res = await fetch("/api/import/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            file_hash: preview.file_hash,
+            file_name: preview.file_name,
+            file_path: filePath,
+            document_type: docType,
+            account_id: accountId,
+            institution: preview.detected.institution,
+            invoice: preview.detected.invoice,
+            transactions: chunks[c],
+          }),
+        });
+
+        // Lê como texto primeiro: se der erro de servidor, a resposta pode não ser JSON.
+        const raw = await res.text();
+        let json: any = null;
+        try { json = raw ? JSON.parse(raw) : null; } catch { /* resposta não-JSON */ }
+
+        if (!res.ok || !json?.ok) {
+          setLoading(false); setProgress(null);
+          return setError(
+            json?.error ?? `Falha ao importar (HTTP ${res.status}). ${(raw || "Sem detalhes.").slice(0, 300)}`
+          );
+        }
+
+        totals.imported += json.imported ?? 0;
+        totals.ignored += json.ignored ?? 0;
+        totals.audits += json.audits ?? 0;
+        totals.reconciled += json.reconciled ?? 0;
+        setProgress(Math.round(((c + 1) / chunks.length) * 100));
+      }
+
+      setLoading(false); setProgress(null);
+      setDone(totals); setPreview(null); setRows([]); setFile(null);
+    } catch (e: any) {
+      setLoading(false); setProgress(null);
+      setError("Erro ao confirmar: " + (e?.message ?? String(e)));
     }
-
-    const res = await fetch("/api/import/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        file_hash: preview.file_hash,
-        file_name: preview.file_name,
-        file_path: filePath,
-        document_type: docType,
-        account_id: accountId,
-        institution: preview.detected.institution,
-        invoice: preview.detected.invoice,
-        transactions: rows,
-      }),
-    });
-    const json = await res.json();
-    setLoading(false);
-    if (!res.ok) return setError(json.error ?? "Falha ao importar.");
-    setDone(json); setPreview(null); setRows([]); setFile(null);
   }
 
   function setRow(i: number, patch: Partial<PreviewTx>) {
@@ -173,14 +208,29 @@ export default function ImportarPage() {
                   <p key={i} className="mt-1 flex items-center gap-1 text-sm text-warn-fg"><AlertTriangle size={14} /> {w}</p>
                 ))}
               </div>
-              <button
-                className="btn-primary"
-                onClick={confirm}
-                disabled={loading || actionableCount === 0}
-                title={actionableCount === 0 ? "Nenhum lançamento marcado para importar ou reconciliar" : undefined}
-              >
-                <CheckCircle2 size={16} /> Confirmar importação ({actionableCount})
-              </button>
+              {progress !== null ? (
+                <div className="w-60">
+                  <div className="mb-1 flex items-center justify-between text-xs font-semibold text-ink-500">
+                    <span>Importando seus lançamentos…</span>
+                    <span>{progress}%</span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className="h-full rounded-full bg-brand-600 transition-all duration-300"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <button
+                  className="btn-primary"
+                  onClick={confirm}
+                  disabled={loading || actionableCount === 0}
+                  title={actionableCount === 0 ? "Nenhum lançamento marcado para importar ou reconciliar" : undefined}
+                >
+                  <CheckCircle2 size={16} /> Confirmar importação ({actionableCount})
+                </button>
+              )}
             </div>
             <div className="max-h-[32rem] overflow-auto">
               <table className="w-full text-sm">
