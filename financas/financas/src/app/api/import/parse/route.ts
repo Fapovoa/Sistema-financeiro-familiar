@@ -69,6 +69,13 @@ export async function POST(req: NextRequest) {
     result = parsePdfText(text);
   }
 
+  // Receita é lançada manualmente: a importação traz APENAS despesas.
+  // (credit_card_payment = pagamento de fatura, mantido só para reconciliar a
+  //  fatura registrada; não vira despesa nova nem receita.)
+  result.transactions = result.transactions.filter(
+    (t) => t.type === "expense" || t.type === "credit_card_payment"
+  );
+
   // Regras de categorização aprendidas do usuário (camada 1)
   const { data: rules } = await supabase
     .from("categorization_rules")
